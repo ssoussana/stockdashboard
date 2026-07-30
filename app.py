@@ -16,6 +16,7 @@ Then open http://localhost:5000
 """
 
 import os
+import threading
 import time
 import requests
 from flask import Flask, jsonify, send_from_directory
@@ -135,18 +136,36 @@ def fetch_sma_all(symbols):
 
 @app.route("/api/sma")
 def sma():
-    now = time.time()
-    if _sma_cache["data"] is not None and (now - _sma_cache["ts"]) < SMA_CACHE_SECONDS:
-        return jsonify(_sma_cache["data"])
-
     if not TWELVE_DATA_API_KEY:
         out = {sym: {"ok": False, "error": "TWELVE_DATA_API_KEY not set"} for sym in SYMBOLS}
         return jsonify(out)
 
-    out = fetch_sma_all(SYMBOLS)
-    _sma_cache["data"] = out
-    _sma_cache["ts"] = now
-    return jsonify(out)
+    if _sma_cache["data"] is None:
+        # Background refresh hasn't completed its first pass yet (takes
+        # roughly a minute the very first time, due to free-tier pacing).
+        out = {sym: {"ok": False, "error": "still loading, try again shortly"} for sym in SYMBOLS}
+        return jsonify(out)
+
+    return jsonify(_sma_cache["data"])
+
+
+def _sma_background_loop():
+    """Runs forever in its own thread, refreshing the SMA cache on a slow
+    cadence. Kept out of the request/response cycle entirely — the pacing
+    this needs (to respect Twelve Data's free-tier rate limit) would
+    otherwise make /api/sma block for over a minute and get killed by the
+    host's request timeout, which is exactly what happened before this."""
+    while True:
+        if TWELVE_DATA_API_KEY:
+            try:
+                _sma_cache["data"] = fetch_sma_all(SYMBOLS)
+                _sma_cache["ts"] = time.time()
+            except Exception:
+                pass  # leave the previous cached data in place, try again next cycle
+        time.sleep(SMA_CACHE_SECONDS)
+
+
+threading.Thread(target=_sma_background_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
