@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Market Pulse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0c10;
+    --panel:#12151b;
+    --panel-hi:#161a21;
+    --border:#20252e;
+    --text:#e7ebf2;
+    --muted:#7c8593;
+    --muted-dim:#535a66;
+    --green:#1fd67a;
+    --green-dim:#12472e;
+    --red:#ff4d63;
+    --red-dim:#4a1620;
+    --amber:#f2b84b;
+    --sans:'Inter',system-ui,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      radial-gradient(1200px 600px at 15% -10%, #131722 0%, transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, #10151f 0%, transparent 55%),
+      var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    min-height:100vh;
+    padding:28px 20px 60px;
+  }
+  .wrap{max-width:1180px;margin:0 auto;}
+
+  /* Header */
+  header{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:22px;}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;color:var(--amber);text-transform:uppercase;margin:0 0 6px;}
+  h1{font-family:var(--sans);font-weight:800;font-size:30px;letter-spacing:-0.02em;margin:0;}
+  .sub{color:var(--muted);font-size:13px;margin-top:4px;font-family:var(--mono);}
+  .status{display:flex;align-items:center;gap:14px;font-family:var(--mono);font-size:12px;color:var(--muted);}
+  .status .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s ease-in-out infinite;}
+  @media (prefers-reduced-motion: reduce){.status .dot{animation:none;}}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+  button.refresh{
+    background:var(--panel-hi);border:1px solid var(--border);color:var(--text);
+    font-family:var(--mono);font-size:12px;padding:7px 12px;border-radius:6px;cursor:pointer;
+  }
+  button.refresh:hover{border-color:var(--muted-dim);}
+  button.refresh:focus-visible, input:focus-visible, button:focus-visible{outline:2px solid var(--amber);outline-offset:2px;}
+
+  /* Fear & Greed panel */
+  .fg-panel{
+    background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    padding:22px 24px;margin-bottom:22px;display:grid;grid-template-columns:260px 1fr;gap:28px;
+  }
+  @media (max-width:720px){.fg-panel{grid-template-columns:1fr;}}
+  .fg-panel h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 14px;font-family:var(--mono);font-weight:600;}
+  .gauge-wrap{display:flex;flex-direction:column;align-items:center;}
+  .gauge-score{font-family:var(--sans);font-weight:800;font-size:44px;margin-top:-38px;letter-spacing:-0.02em;}
+  .gauge-label{font-family:var(--mono);font-size:13px;letter-spacing:.06em;margin-top:2px;}
+  .needle{transition:transform 1s cubic-bezier(.4,1.4,.4,1);transform-origin:100px 100px;}
+  @media (prefers-reduced-motion: reduce){.needle{transition:none;}}
+
+  .components{display:flex;flex-direction:column;justify-content:center;gap:11px;}
+  .comp-row{display:grid;grid-template-columns:130px 1fr 34px;align-items:center;gap:10px;}
+  .comp-name{font-size:12px;color:var(--muted);font-family:var(--mono);}
+  .comp-track{height:6px;background:var(--bg);border-radius:3px;overflow:hidden;border:1px solid var(--border);}
+  .comp-fill{height:100%;border-radius:3px;}
+  .comp-val{font-family:var(--mono);font-size:12px;color:var(--muted);text-align:right;}
+
+  /* Stock grid */
+  .grid-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px;}
+  .grid-head h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0;font-family:var(--mono);font-weight:600;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;}
+  .card{
+    background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;
+    position:relative;overflow:hidden;
+  }
+  .card .bar{position:absolute;left:0;top:0;bottom:0;width:3px;}
+  .card.up .bar{background:var(--green);}
+  .card.down .bar{background:var(--red);}
+  .card .row1{display:flex;justify-content:space-between;align-items:flex-start;}
+  .sym{font-family:var(--mono);font-weight:700;font-size:15px;letter-spacing:.02em;}
+  .price{font-family:var(--sans);font-weight:700;font-size:22px;margin-top:6px;}
+  .chg{font-family:var(--mono);font-size:12.5px;margin-top:3px;}
+  .chg.up{color:var(--green);}
+  .chg.down{color:var(--red);}
+  .spark{margin-top:8px;display:block;}
+  .card .status-pill{font-family:var(--mono);font-size:10px;color:var(--muted-dim);}
+  .card.err{opacity:.55;}
+  .card.err .price{color:var(--muted);font-size:13px;}
+
+  footer{margin-top:30px;text-align:center;color:var(--muted-dim);font-family:var(--mono);font-size:11px;}
+  footer a{color:var(--muted);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <p class="eyebrow">AI Infrastructure Watch</p>
+      <h1>Market Pulse</h1>
+      <p class="sub">13 tickers &middot; sentiment gauge &middot; auto-refresh every 5 min</p>
+    </div>
+    <div class="status">
+      <span class="dot"></span>
+      <span id="updated">not loaded yet</span>
+      <span id="countdown"></span>
+      <button class="refresh" id="refreshBtn">Refresh now</button>
+    </div>
+  </header>
+
+  <section class="fg-panel">
+    <div class="gauge-wrap">
+      <h2 style="align-self:flex-start;">Sentiment</h2>
+      <svg width="200" height="120" viewBox="0 0 200 120">
+        <defs>
+          <linearGradient id="arcGrad" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0%" stop-color="#ff4d63"/>
+            <stop offset="25%" stop-color="#f2854b"/>
+            <stop offset="50%" stop-color="#f2d24b"/>
+            <stop offset="75%" stop-color="#a8d64b"/>
+            <stop offset="100%" stop-color="#1fd67a"/>
+          </linearGradient>
+        </defs>
+        <path d="M 15 100 A 85 85 0 0 1 185 100" fill="none" stroke="url(#arcGrad)" stroke-width="10" stroke-linecap="round"/>
+        <line id="needle" class="needle" x1="100" y1="100" x2="100" y2="28" stroke="#e7ebf2" stroke-width="3" stroke-linecap="round" transform="rotate(-90 100 100)"/>
+        <circle cx="100" cy="100" r="5" fill="#e7ebf2"/>
+      </svg>
+      <div class="gauge-score" id="fgScore">&mdash;</div>
+      <div class="gauge-label" id="fgLabel" style="color:var(--muted);">Loading&hellip;</div>
+    </div>
+    <div class="components" id="fgComponents"></div>
+  </section>
+
+  <div class="grid-head">
+    <h2>Watchlist</h2>
+  </div>
+  <div class="grid" id="stockGrid"></div>
+
+  <footer>
+    Quotes via Finnhub &middot; Sentiment via feargreedchart.com &middot; Sparklines reflect this session only
+  </footer>
+</div>
+
+<script>
+const SYMBOLS = ["PLTR","NVDA","CLS","NBIS","HOOD","SPY","QQQ","GLW","CRDO","COHR","SOXL","DRAM","IREN"];
+const REFRESH_MS = 5 * 60 * 1000;
+const state = { apiKey: null, history: {}, secondsLeft: REFRESH_MS/1000 };
+
+const grid = document.getElementById('stockGrid');
+const updatedEl = document.getElementById('updated');
+const countdownEl = document.getElementById('countdown');
+
+// ---------- card scaffolding ----------
+function buildCards(){
+  grid.innerHTML = SYMBOLS.map(sym => `
+    <div class="card" id="card-${sym}">
+      <div class="bar"></div>
+      <div class="row1">
+        <span class="sym">${sym}</span>
+        <span class="status-pill" id="pill-${sym}"></span>
+      </div>
+      <div class="price" id="price-${sym}">&mdash;</div>
+      <div class="chg" id="chg-${sym}">waiting for data</div>
+      <svg class="spark" id="spark-${sym}" width="100%" height="30" viewBox="0 0 200 30" preserveAspectRatio="none"></svg>
+    </div>
+  `).join('');
+}
+
+function renderSpark(sym){
+  const hist = state.history[sym] || [];
+  const svg = document.getElementById(`spark-${sym}`);
+  if(hist.length < 2){ svg.innerHTML = ''; return; }
+  const min = Math.min(...hist), max = Math.max(...hist);
+  const range = (max - min) || 1;
+  const w = 200, h = 28, pad = 2;
+  const pts = hist.map((v,i) => {
+    const x = (i/(hist.length-1)) * w;
+    const y = pad + (1 - (v-min)/range) * (h - pad*2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const up = hist[hist.length-1] >= hist[0];
+  svg.innerHTML = `<polyline points="${pts}" fill="none" stroke="${up ? '#1fd67a' : '#ff4d63'}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>`;
+}
+
+async function refreshStocks(){
+  let data;
+  try{
+    const res = await fetch('/api/quotes');
+    data = await res.json();
+  }catch(e){
+    SYMBOLS.forEach(sym => {
+      const card = document.getElementById(`card-${sym}`);
+      card.classList.add('err');
+      document.getElementById(`price-${sym}`).textContent = 'server unreachable';
+      document.getElementById(`chg-${sym}`).textContent = 'is app.py running?';
+    });
+    return;
+  }
+
+  SYMBOLS.forEach(sym => {
+    const card = document.getElementById(`card-${sym}`);
+    const q = data[sym];
+    if(!q || !q.ok){
+      card.classList.add('err');
+      document.getElementById(`price-${sym}`).textContent = 'unavailable';
+      document.getElementById(`chg-${sym}`).textContent = (q && q.error) || 'fetch failed';
+      return;
+    }
+    const up = q.d >= 0;
+    card.classList.remove('err');
+    card.classList.toggle('up', up);
+    card.classList.toggle('down', !up);
+    document.getElementById(`price-${sym}`).textContent = `$${q.c.toFixed(2)}`;
+    document.getElementById(`chg-${sym}`).innerHTML =
+      `<span class="chg ${up?'up':'down'}">${up?'+':''}${q.d.toFixed(2)} (${up?'+':''}${q.dp.toFixed(2)}%)</span>`;
+    document.getElementById(`pill-${sym}`).textContent = up ? '▲' : '▼';
+    if(!state.history[sym]) state.history[sym] = [];
+    state.history[sym].push(q.c);
+    if(state.history[sym].length > 60) state.history[sym].shift();
+    renderSpark(sym);
+  });
+}
+
+// ---------- Fear & Greed ----------
+function scoreLabel(score){
+  if(score <= 20) return ['Extreme Fear', '#ff4d63'];
+  if(score <= 40) return ['Fear', '#f2854b'];
+  if(score <= 60) return ['Neutral', '#f2d24b'];
+  if(score <= 80) return ['Greed', '#a8d64b'];
+  return ['Extreme Greed', '#1fd67a'];
+}
+
+async function refreshFearGreed(){
+  try{
+    const res = await fetch('https://feargreedchart.com/api/?action=all');
+    const d = await res.json();
+    const score = d.score.score;
+    const [label, color] = scoreLabel(score);
+    document.getElementById('fgScore').textContent = score;
+    const labelEl = document.getElementById('fgLabel');
+    labelEl.textContent = label;
+    labelEl.style.color = color;
+    const angle = -90 + (score/100)*180;
+    document.getElementById('needle').style.transform = `rotate(${angle}deg)`;
+
+    const compsEl = document.getElementById('fgComponents');
+    compsEl.innerHTML = d.score.components.map(c => `
+      <div class="comp-row">
+        <span class="comp-name">${c.name}</span>
+        <span class="comp-track"><span class="comp-fill" style="width:${c.val}%;background:${scoreLabel(c.val)[1]};"></span></span>
+        <span class="comp-val">${c.val}</span>
+      </div>
+    `).join('');
+  }catch(e){
+    document.getElementById('fgLabel').textContent = 'unavailable';
+  }
+}
+
+// ---------- orchestration ----------
+async function refreshAll(){
+  updatedEl.textContent = 'refreshing…';
+  await Promise.all([refreshStocks(), refreshFearGreed()]);
+  updatedEl.textContent = `updated ${new Date().toLocaleTimeString()}`;
+  state.secondsLeft = REFRESH_MS/1000;
+}
+
+document.getElementById('refreshBtn').addEventListener('click', refreshAll);
+
+function tickCountdown(){
+  state.secondsLeft = Math.max(0, state.secondsLeft - 1);
+  const m = Math.floor(state.secondsLeft/60), s = state.secondsLeft%60;
+  countdownEl.textContent = `next in ${m}:${s.toString().padStart(2,'0')}`;
+}
+
+(async function init(){
+  buildCards();
+  refreshAll();
+  setInterval(refreshAll, REFRESH_MS);
+  setInterval(tickCountdown, 1000);
+})();
+</script>
+</body>
+</html>
