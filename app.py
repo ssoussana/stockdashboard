@@ -92,6 +92,8 @@ def fetch_sma_batch(symbols):
     """One HTTP call per batch of up to 8 symbols — Twelve Data accepts
     comma-separated symbols in a single request, so this needs far fewer
     round trips than fetching one symbol at a time."""
+    print(f"[sma] requesting batch: {symbols}", flush=True)
+    t0 = time.time()
     r = requests.get(
         "https://api.twelvedata.com/time_series",
         params={
@@ -100,8 +102,9 @@ def fetch_sma_batch(symbols):
             "outputsize": 50,
             "apikey": TWELVE_DATA_API_KEY,
         },
-        timeout=15,
+        timeout=(5, 15),  # (connect timeout, read timeout) — explicit, not a single shared value
     )
+    print(f"[sma] batch {symbols} responded in {time.time()-t0:.1f}s, status {r.status_code}", flush=True)
     payload = r.json()
     # A single-symbol request returns one object with a top-level "values"
     # key; a multi-symbol request returns an object keyed by symbol. Normalize
@@ -145,12 +148,15 @@ def fetch_sma_all(symbols):
         try:
             out.update(fetch_sma_batch(batch))
         except Exception as e:
+            print(f"[sma] batch {batch} raised: {e!r}", flush=True)
             for sym in batch:
                 out[sym] = {"ok": False, "error": f"batch request failed: {e}"}
         _sma_cache["data"] = dict(out)
         _sma_cache["ts"] = time.time()
         if i + TWELVE_DATA_BATCH_SIZE < len(symbols):
+            print(f"[sma] pausing {TWELVE_DATA_BATCH_PAUSE}s before next batch", flush=True)
             time.sleep(TWELVE_DATA_BATCH_PAUSE)
+    print("[sma] pass complete", flush=True)
     return out
 
 
@@ -177,17 +183,19 @@ def _sma_background_loop():
     this needs (to respect Twelve Data's free-tier rate limit) would
     otherwise make /api/sma block long enough to get killed by the host's
     request timeout, which is exactly what happened before this."""
+    print("[sma] background thread started", flush=True)
     while True:
         if TWELVE_DATA_API_KEY:
             _sma_status["attempt_started"] = time.time()
             try:
                 fetch_sma_all(SYMBOLS)  # writes into _sma_cache incrementally as it runs
-            except Exception:
-                pass
-        # If nothing has landed in the cache at all, this was likely a
-        # connectivity problem (same failure mode Stooq had) rather than a
-        # normal completed pass — retry soon instead of waiting 4 hours.
-        time.sleep(SMA_CACHE_SECONDS if _sma_cache["data"] is not None else 5 * 60)
+            except Exception as e:
+                print(f"[sma] fetch_sma_all raised: {e!r}", flush=True)
+        else:
+            print("[sma] TWELVE_DATA_API_KEY not set, skipping", flush=True)
+        nap = SMA_CACHE_SECONDS if _sma_cache["data"] is not None else 5 * 60
+        print(f"[sma] sleeping {nap}s until next refresh", flush=True)
+        time.sleep(nap)
 
 
 threading.Thread(target=_sma_background_loop, daemon=True).start()
