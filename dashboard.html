@@ -86,8 +86,29 @@
   .index-strip .idx .chg.down{color:var(--red);}
 
   /* Stock grid */
-  .grid-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px;}
+  .grid-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:16px;flex-wrap:wrap;}
   .grid-head h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0;font-family:var(--mono);font-weight:600;}
+  .add-box{position:relative;}
+  .add-box input{
+    background:var(--panel);border:1px solid var(--border);color:var(--text);
+    font-family:var(--mono);font-size:13px;padding:7px 10px;border-radius:6px;width:220px;
+  }
+  .add-box input::placeholder{color:var(--muted-dim);}
+  .suggestions{
+    position:absolute;top:calc(100% + 4px);right:0;width:280px;
+    background:var(--panel-hi);border:1px solid var(--border);border-radius:8px;
+    box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:10;overflow:hidden;display:none;
+  }
+  .suggestions.open{display:block;}
+  .suggestions .opt{
+    padding:9px 12px;cursor:pointer;display:flex;justify-content:space-between;gap:10px;
+    font-family:var(--mono);font-size:12.5px;border-bottom:1px solid var(--border);
+  }
+  .suggestions .opt:last-child{border-bottom:none;}
+  .suggestions .opt:hover, .suggestions .opt.active{background:var(--bg);}
+  .suggestions .opt .sym{font-size:12.5px;}
+  .suggestions .opt .desc{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px;}
+  .suggestions .empty{padding:10px 12px;color:var(--muted-dim);font-family:var(--mono);font-size:12px;}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;}
   .card{
     background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;
@@ -98,6 +119,12 @@
   .card.down .bar{background:var(--red);}
   .card .row1{display:flex;justify-content:space-between;align-items:flex-start;}
   .sym{font-family:var(--mono);font-weight:700;font-size:15px;letter-spacing:.02em;}
+  .row1-right{display:flex;align-items:center;gap:8px;}
+  .remove-btn{
+    background:none;border:none;color:var(--muted-dim);font-family:var(--mono);
+    font-size:15px;line-height:1;cursor:pointer;padding:2px 4px;border-radius:4px;
+  }
+  .remove-btn:hover{color:var(--red);background:var(--red-dim);}
   .price{font-family:var(--sans);font-weight:700;font-size:22px;margin-top:6px;}
   .chg{font-family:var(--mono);font-size:12.5px;margin-top:3px;}
   .chg.up{color:var(--green);}
@@ -124,7 +151,7 @@
     <div>
       <p class="eyebrow">AI Infrastructure Watch</p>
       <h1>Market Pulse</h1>
-      <p class="sub">13 tickers &middot; sentiment gauge &middot; auto-refresh every 1 min</p>
+      <p class="sub"><span id="tickerCount">13</span> tickers &middot; sentiment gauge &middot; auto-refresh every 1 min</p>
     </div>
     <div class="status">
       <span class="dot"></span>
@@ -165,6 +192,10 @@
 
   <div class="grid-head">
     <h2>Watchlist</h2>
+    <div class="add-box">
+      <input type="text" id="addInput" placeholder="Add a ticker or company&hellip;" autocomplete="off">
+      <div class="suggestions" id="suggestions"></div>
+    </div>
   </div>
   <div class="grid" id="stockGrid"></div>
 
@@ -174,7 +205,25 @@
 </div>
 
 <script>
-const SYMBOLS = ["PLTR","NVDA","CLS","NBIS","HOOD","SPY","QQQ","GLW","CRDO","COHR","SOXL","DRAM","IREN"];
+const DEFAULT_SYMBOLS = ["PLTR","NVDA","CLS","NBIS","HOOD","SPY","QQQ","GLW","CRDO","COHR","SOXL","DRAM","IREN"];
+const STORAGE_KEY = 'market_pulse_watchlist';
+
+function loadSymbols(){
+  try{
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if(saved){
+      const parsed = JSON.parse(saved);
+      if(Array.isArray(parsed) && parsed.length) return parsed;
+    }
+  }catch(e){ /* fall through to default */ }
+  return [...DEFAULT_SYMBOLS];
+}
+
+function saveSymbols(){
+  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(SYMBOLS)); }catch(e){ /* storage unavailable, non-fatal */ }
+}
+
+let SYMBOLS = loadSymbols();
 const REFRESH_MS = 60 * 1000;
 const state = { history: {}, sma: null, lastPrice: {}, secondsLeft: REFRESH_MS/1000 };
 
@@ -184,12 +233,16 @@ const countdownEl = document.getElementById('countdown');
 
 // ---------- card scaffolding ----------
 function buildCards(){
+  document.getElementById('tickerCount').textContent = SYMBOLS.length;
   grid.innerHTML = SYMBOLS.map(sym => `
     <div class="card" id="card-${sym}">
       <div class="bar"></div>
       <div class="row1">
         <span class="sym">${sym}</span>
-        <span class="status-pill" id="pill-${sym}"></span>
+        <div class="row1-right">
+          <span class="status-pill" id="pill-${sym}"></span>
+          <button class="remove-btn" data-sym="${sym}" title="Remove ${sym}" aria-label="Remove ${sym}">&times;</button>
+        </div>
       </div>
       <div class="price" id="price-${sym}">&mdash;</div>
       <div class="chg" id="chg-${sym}">waiting for data</div>
@@ -197,6 +250,30 @@ function buildCards(){
       <div class="sma" id="sma-${sym}">SMA loading&hellip;</div>
     </div>
   `).join('');
+
+  grid.querySelectorAll('.remove-btn').forEach(btn => {
+    btn.addEventListener('click', () => removeSymbol(btn.dataset.sym));
+  });
+}
+
+function removeSymbol(sym){
+  SYMBOLS = SYMBOLS.filter(s => s !== sym);
+  saveSymbols();
+  delete state.history[sym];
+  delete state.lastPrice[sym];
+  buildCards();
+  refreshAll();
+  refreshSma();
+}
+
+function addSymbol(sym){
+  sym = sym.toUpperCase();
+  if(SYMBOLS.includes(sym)) return;
+  SYMBOLS.push(sym);
+  saveSymbols();
+  buildCards();
+  refreshAll();
+  refreshSma();
 }
 
 function renderSpark(sym){
@@ -218,7 +295,7 @@ function renderSpark(sym){
 async function refreshStocks(){
   let data;
   try{
-    const res = await fetch('/api/quotes');
+    const res = await fetch(`/api/quotes?symbols=${SYMBOLS.join(',')}`);
     data = await res.json();
   }catch(e){
     SYMBOLS.forEach(sym => {
@@ -259,7 +336,7 @@ async function refreshStocks(){
 // ---------- SMA (20/50 day) ----------
 async function refreshSma(){
   try{
-    const res = await fetch('/api/sma');
+    const res = await fetch(`/api/sma?symbols=${SYMBOLS.join(',')}`);
     state.sma = await res.json();
   }catch(e){
     state.sma = null;
@@ -367,6 +444,91 @@ function tickCountdown(){
 }
 
 const SMA_REFRESH_MS = 60 * 60 * 1000; // matches backend's slower daily-data cache
+
+// ---------- add / search ----------
+const addInput = document.getElementById('addInput');
+const suggestionsEl = document.getElementById('suggestions');
+let searchDebounce = null;
+let activeIndex = -1;
+let currentResults = [];
+
+async function runSearch(q){
+  if(!q){ closeSuggestions(); return; }
+  try{
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    currentResults = await res.json();
+  }catch(e){
+    currentResults = [];
+  }
+  renderSuggestions();
+}
+
+function renderSuggestions(){
+  activeIndex = -1;
+  if(!currentResults.length){
+    suggestionsEl.innerHTML = `<div class="empty">No matches</div>`;
+    suggestionsEl.classList.add('open');
+    return;
+  }
+  suggestionsEl.innerHTML = currentResults.map((r, i) => `
+    <div class="opt" data-index="${i}" data-sym="${r.symbol}">
+      <span class="sym">${r.symbol}</span>
+      <span class="desc">${r.description || ''}</span>
+    </div>
+  `).join('');
+  suggestionsEl.classList.add('open');
+  suggestionsEl.querySelectorAll('.opt').forEach(opt => {
+    opt.addEventListener('click', () => pickSuggestion(opt.dataset.sym));
+  });
+}
+
+function closeSuggestions(){
+  suggestionsEl.classList.remove('open');
+  suggestionsEl.innerHTML = '';
+  currentResults = [];
+  activeIndex = -1;
+}
+
+function pickSuggestion(sym){
+  addSymbol(sym);
+  addInput.value = '';
+  closeSuggestions();
+}
+
+addInput.addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  const q = addInput.value.trim();
+  searchDebounce = setTimeout(() => runSearch(q), 250);
+});
+
+addInput.addEventListener('keydown', (e) => {
+  const opts = suggestionsEl.querySelectorAll('.opt');
+  if(e.key === 'ArrowDown'){
+    e.preventDefault();
+    if(opts.length){ activeIndex = (activeIndex + 1) % opts.length; updateActive(opts); }
+  }else if(e.key === 'ArrowUp'){
+    e.preventDefault();
+    if(opts.length){ activeIndex = (activeIndex - 1 + opts.length) % opts.length; updateActive(opts); }
+  }else if(e.key === 'Enter'){
+    e.preventDefault();
+    if(activeIndex >= 0 && currentResults[activeIndex]){
+      pickSuggestion(currentResults[activeIndex].symbol);
+    }else if(addInput.value.trim()){
+      // No suggestion picked — treat the typed text itself as a ticker.
+      pickSuggestion(addInput.value.trim());
+    }
+  }else if(e.key === 'Escape'){
+    closeSuggestions();
+  }
+});
+
+function updateActive(opts){
+  opts.forEach((o, i) => o.classList.toggle('active', i === activeIndex));
+}
+
+document.addEventListener('click', (e) => {
+  if(!e.target.closest('.add-box')) closeSuggestions();
+});
 
 (async function init(){
   buildCards();
