@@ -20,6 +20,7 @@
     --red:#ff4d63;
     --red-dim:#4a1620;
     --amber:#f2b84b;
+    --lime:#a8d64b;
     --sans:'Inter',system-ui,sans-serif;
     --mono:'IBM Plex Mono',ui-monospace,monospace;
   }
@@ -143,6 +144,8 @@
   .sma .down{color:var(--red);}
   .sma .rsi-hot{color:var(--red);}
   .sma .rsi-cold{color:var(--green);}
+  .sma .rsi-warn-hot{color:var(--amber);}
+  .sma .rsi-warn-cold{color:var(--lime);}
   .card .status-pill{font-family:var(--mono);font-size:10px;color:var(--muted-dim);}
   .card.err{opacity:.55;}
   .card.err .price{color:var(--muted);font-size:13px;}
@@ -374,7 +377,11 @@ function renderSma(sym){
     parts.push(`<span class="stat ${cls}">50d&nbsp;$${s.sma50.toFixed(2)}</span>`);
   }
   if(s.rsi14 != null){
-    const cls = s.rsi14 >= 70 ? 'rsi-hot' : (s.rsi14 <= 30 ? 'rsi-cold' : '');
+    let cls = '';
+    if(s.rsi14 >= 70) cls = 'rsi-hot';
+    else if(s.rsi14 >= 65) cls = 'rsi-warn-hot';
+    else if(s.rsi14 <= 30) cls = 'rsi-cold';
+    else if(s.rsi14 <= 35) cls = 'rsi-warn-cold';
     parts.push(`<span class="stat ${cls}">RSI&nbsp;${s.rsi14.toFixed(1)}</span>`);
   }
   el.innerHTML = parts.join('') || 'SMA n/a';
