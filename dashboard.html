@@ -126,10 +126,14 @@
     font-size:15px;line-height:1;cursor:pointer;padding:2px 4px;border-radius:4px;
   }
   .remove-btn:hover{color:var(--red);background:var(--red-dim);}
-  .price{font-family:var(--sans);font-weight:700;font-size:22px;margin-top:6px;}
+  .price-row{display:flex;align-items:baseline;gap:8px;margin-top:6px;flex-wrap:wrap;}
+  .price{font-family:var(--sans);font-weight:700;font-size:22px;}
   .price.signal-up{color:var(--green);}
   .price.signal-down{color:var(--red);}
   .price.signal-mixed{color:var(--amber);}
+  .afterhours{font-family:var(--mono);font-size:12px;color:var(--muted);}
+  .afterhours.up{color:var(--green);}
+  .afterhours.down{color:var(--red);}
   .chg{font-family:var(--mono);font-size:12.5px;margin-top:3px;}
   .chg.up{color:var(--green);}
   .chg.down{color:var(--red);}
@@ -236,7 +240,7 @@ function saveSymbols(){
 
 let SYMBOLS = loadSymbols();
 const REFRESH_MS = 60 * 1000;
-const state = { history: {}, sma: null, lastPrice: {}, secondsLeft: REFRESH_MS/1000 };
+const state = { history: {}, sma: null, afterhours: null, lastPrice: {}, lastPct: {}, secondsLeft: REFRESH_MS/1000 };
 
 const grid = document.getElementById('stockGrid');
 const updatedEl = document.getElementById('updated');
@@ -255,7 +259,10 @@ function buildCards(){
           <button class="remove-btn" data-sym="${sym}" title="Remove ${sym}" aria-label="Remove ${sym}">&times;</button>
         </div>
       </div>
-      <div class="price" id="price-${sym}">&mdash;</div>
+      <div class="price-row">
+        <span class="price" id="price-${sym}">&mdash;</span>
+        <span class="afterhours" id="ah-${sym}"></span>
+      </div>
       <div class="chg" id="chg-${sym}">waiting for data</div>
       <svg class="spark" id="spark-${sym}" width="100%" height="30" viewBox="0 0 200 30" preserveAspectRatio="none"></svg>
       <div class="sma" id="sma-${sym}">SMA loading&hellip;</div>
@@ -272,6 +279,7 @@ function removeSymbol(sym){
   saveSymbols();
   delete state.history[sym];
   delete state.lastPrice[sym];
+  delete state.lastPct[sym];
   buildCards();
   refreshAll();
   refreshSma();
@@ -340,7 +348,28 @@ async function refreshStocks(){
     if(state.history[sym].length > 60) state.history[sym].shift();
     renderSpark(sym);
     state.lastPrice[sym] = q.c;
+    state.lastPct[sym] = q.dp;
     renderSma(sym);
+  });
+
+  reorderByPerformance();
+}
+
+// Highest daily % gainer first, biggest loser last. Uses the CSS Grid
+// `order` property rather than rebuilding the DOM, so card elements (and
+// everything tied to their ids — sparkline history, listeners) stay intact;
+// only their visual position changes.
+function reorderByPerformance(){
+  const ranked = [...SYMBOLS].sort((a, b) => {
+    const pa = state.lastPct[a], pb = state.lastPct[b];
+    if(pa == null && pb == null) return 0;
+    if(pa == null) return 1;   // symbols with no data sink to the bottom
+    if(pb == null) return -1;
+    return pb - pa;            // descending: highest gainer first
+  });
+  ranked.forEach((sym, i) => {
+    const card = document.getElementById(`card-${sym}`);
+    if(card) card.style.order = i;
   });
 }
 
@@ -353,6 +382,35 @@ async function refreshSma(){
     state.sma = null;
   }
   SYMBOLS.forEach(renderSma);
+}
+
+// ---------- After-hours price ----------
+// Cheap to poll often — served from a server-side cache that itself only
+// refreshes every 5 minutes and only during actual pre/post-market hours,
+// so frequent polling here doesn't cost any extra API credits.
+async function refreshAfterhours(){
+  try{
+    const res = await fetch(`/api/afterhours?symbols=${SYMBOLS.join(',')}`);
+    state.afterhours = await res.json();
+  }catch(e){
+    state.afterhours = null;
+  }
+  SYMBOLS.forEach(renderAfterhours);
+}
+
+function renderAfterhours(sym){
+  const el = document.getElementById(`ah-${sym}`);
+  if(!el) return;
+  const a = state.afterhours && state.afterhours[sym];
+  if(!a || !a.ok || !a.active || a.price == null){
+    el.textContent = '';
+    el.className = 'afterhours';
+    return;
+  }
+  const regular = state.lastPrice[sym];
+  const cls = regular != null ? (a.price >= regular ? 'up' : 'down') : '';
+  el.className = `afterhours ${cls}`;
+  el.textContent = `(AH $${a.price.toFixed(2)})`;
 }
 
 function renderSma(sym){
@@ -460,7 +518,7 @@ function renderIndexStrip(market){
 // ---------- orchestration ----------
 async function refreshAll(){
   updatedEl.textContent = 'refreshing…';
-  await Promise.all([refreshStocks(), refreshFearGreed()]);
+  await Promise.all([refreshStocks(), refreshFearGreed(), refreshAfterhours()]);
   updatedEl.textContent = `updated ${new Date().toLocaleTimeString()}`;
   state.secondsLeft = REFRESH_MS/1000;
 }

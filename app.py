@@ -15,10 +15,13 @@ Setup:
 Then open http://localhost:5000
 """
 
+import collections
 import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, time as dt_time
+from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 
@@ -168,7 +171,28 @@ def search():
 
 
 TWELVE_DATA_BATCH_SIZE = 8   # free-tier limit: 8 credits/minute
-TWELVE_DATA_BATCH_PAUSE = 61  # seconds — wait out the per-minute window
+
+# One shared limiter for every Twelve Data call, whichever feature makes it
+# (SMA/RSI's scheduled pass, an immediate one-off add, or after-hours
+# prices). Blocks the caller until enough credits are free in the trailing
+# 60-second window, so two features can never independently burst past the
+# combined free-tier limit — replaces the old fixed-pause approach, which
+# only worked as long as nothing else was also calling Twelve Data.
+_credit_lock = threading.Lock()
+_credit_timestamps = collections.deque()
+
+
+def acquire_twelvedata_credits(n):
+    while True:
+        with _credit_lock:
+            now = time.time()
+            while _credit_timestamps and now - _credit_timestamps[0] > 60:
+                _credit_timestamps.popleft()
+            if len(_credit_timestamps) + n <= TWELVE_DATA_BATCH_SIZE:
+                for _ in range(n):
+                    _credit_timestamps.append(now)
+                return
+        time.sleep(2)
 
 
 def compute_rsi14(closes, period=14):
@@ -195,6 +219,7 @@ def fetch_sma_batch(symbols):
     """One HTTP call per batch of up to 8 symbols — Twelve Data accepts
     comma-separated symbols in a single request, so this needs far fewer
     round trips than fetching one symbol at a time."""
+    acquire_twelvedata_credits(len(symbols))
     print(f"[sma] requesting batch: {symbols}", flush=True)
     t0 = time.time()
     r = requests.get(
@@ -265,7 +290,8 @@ def fetch_sma_all(symbols):
     """Fetches every symbol in batches, writing each batch's results into
     the shared per-symbol cache as soon as that batch finishes — not just
     at the end — so results (or a real error) show up within seconds
-    instead of only after the full pass."""
+    instead of only after the full pass. Pacing between batches happens
+    automatically inside fetch_sma_batch via the shared credit limiter."""
     for i in range(0, len(symbols), TWELVE_DATA_BATCH_SIZE):
         batch = symbols[i:i + TWELVE_DATA_BATCH_SIZE]
         try:
@@ -276,9 +302,6 @@ def fetch_sma_all(symbols):
         now = time.time()
         for sym, data in batch_out.items():
             _sma_cache[sym] = {"data": data, "ts": now}
-        if i + TWELVE_DATA_BATCH_SIZE < len(symbols):
-            print(f"[sma] pausing {TWELVE_DATA_BATCH_PAUSE}s before next batch", flush=True)
-            time.sleep(TWELVE_DATA_BATCH_PAUSE)
     print("[sma] pass complete", flush=True)
 
 
@@ -332,6 +355,124 @@ def _sma_background_loop():
 
 
 threading.Thread(target=_sma_background_loop, daemon=True).start()
+
+
+# ---------- After-hours price ----------
+# US market extended-hours windows, Eastern time. This is an approximation
+# — it doesn't account for market holidays or early-close days.
+PRE_MARKET_START = dt_time(4, 0)
+PRE_MARKET_END = dt_time(9, 30)
+POST_MARKET_START = dt_time(16, 0)
+POST_MARKET_END = dt_time(20, 0)
+
+AFTERHOURS_CACHE_SECONDS = 15 * 60  # per-user request: 15-minute refresh
+_afterhours_cache = {}  # symbol -> {"data": {...}, "ts": float}
+
+
+def market_session_now():
+    """Returns 'pre', 'post', or 'closed' (which also covers regular market
+    hours — no extended price to show then). Fails safe to 'closed' if the
+    system's timezone database is unavailable, so it just skips fetching
+    rather than erroring."""
+    try:
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+    except Exception:
+        return "closed"
+    if now_et.weekday() >= 5:  # Saturday/Sunday
+        return "closed"
+    t = now_et.time()
+    if PRE_MARKET_START <= t < PRE_MARKET_END:
+        return "pre"
+    if POST_MARKET_START <= t < POST_MARKET_END:
+        return "post"
+    return "closed"
+
+
+def fetch_afterhours_batch(symbols):
+    """One HTTP call per batch of up to 8 symbols, using Twelve Data's
+    prepost=true quote option to get the latest extended-hours print
+    alongside the regular session's numbers."""
+    acquire_twelvedata_credits(len(symbols))
+    print(f"[afterhours] requesting batch: {symbols}", flush=True)
+    r = requests.get(
+        "https://api.twelvedata.com/quote",
+        params={
+            "symbol": ",".join(symbols),
+            "prepost": "true",
+            "apikey": TWELVE_DATA_API_KEY,
+        },
+        timeout=(5, 15),
+    )
+    print(f"[afterhours] batch {symbols} responded, status {r.status_code}", flush=True)
+    payload = r.json()
+    if len(symbols) == 1 and ("close" in payload or "symbol" in payload):
+        payload = {symbols[0]: payload}
+
+    out = {}
+    for sym in symbols:
+        entry = payload.get(sym)
+        try:
+            if not entry:
+                raise ValueError("symbol missing from batch response")
+            if entry.get("status") == "error":
+                raise ValueError(entry.get("message", "twelve data error"))
+            is_ext = str(entry.get("is_extended_hours", "")).lower() == "true"
+            if not is_ext:
+                out[sym] = {"ok": True, "active": False}
+                continue
+            # Field name isn't fully confirmed from documentation alone —
+            # fall back to "close" (which Twelve Data's own example shows
+            # holding the extended print when is_extended_hours is true)
+            # if a dedicated "extended_price" field isn't present.
+            price = entry.get("extended_price", entry.get("close"))
+            if price is None:
+                raise ValueError("no extended price in response")
+            out[sym] = {"ok": True, "active": True, "price": round(float(price), 2)}
+        except Exception as e:
+            out[sym] = {"ok": False, "error": str(e)}
+    return out
+
+
+def _afterhours_background_loop():
+    print("[afterhours] background thread started", flush=True)
+    while True:
+        session = market_session_now()
+        if session in ("pre", "post") and TWELVE_DATA_API_KEY:
+            with _known_lock:
+                symbols = sorted(_known_symbols)
+            print(f"[afterhours] market session is '{session}', refreshing {len(symbols)} symbols", flush=True)
+            for i in range(0, len(symbols), TWELVE_DATA_BATCH_SIZE):
+                batch = symbols[i:i + TWELVE_DATA_BATCH_SIZE]
+                try:
+                    batch_out = fetch_afterhours_batch(batch)
+                except Exception as e:
+                    print(f"[afterhours] batch {batch} raised: {e!r}", flush=True)
+                    batch_out = {sym: {"ok": False, "error": f"batch request failed: {e}"} for sym in batch}
+                now = time.time()
+                for sym, data in batch_out.items():
+                    _afterhours_cache[sym] = {"data": data, "ts": now}
+            print("[afterhours] pass complete", flush=True)
+        else:
+            print(f"[afterhours] market session is '{session}', skipping", flush=True)
+        time.sleep(AFTERHOURS_CACHE_SECONDS)
+
+
+threading.Thread(target=_afterhours_background_loop, daemon=True).start()
+
+
+@app.route("/api/afterhours")
+def afterhours():
+    symbols = parse_symbols_param()
+    register_known_symbols(symbols)
+
+    if not TWELVE_DATA_API_KEY:
+        return jsonify({sym: {"ok": False, "error": "TWELVE_DATA_API_KEY not set"} for sym in symbols})
+
+    out = {}
+    for sym in symbols:
+        entry = _afterhours_cache.get(sym)
+        out[sym] = entry["data"] if entry else {"ok": True, "active": False}
+    return jsonify(out)
 
 
 if __name__ == "__main__":
