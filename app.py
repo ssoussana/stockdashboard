@@ -371,12 +371,11 @@ _afterhours_cache = {}  # symbol -> {"data": {...}, "ts": float}
 
 def market_session_now():
     """Returns 'pre', 'post', or 'closed' (which also covers regular market
-    hours — no extended price to show then). Fails safe to 'closed' if the
-    system's timezone database is unavailable, so it just skips fetching
-    rather than erroring."""
+    hours — no extended price to show then)."""
     try:
         now_et = datetime.now(ZoneInfo("America/New_York"))
-    except Exception:
+    except Exception as e:
+        print(f"[afterhours] ZoneInfo lookup failed: {e!r} — treating as closed", flush=True)
         return "closed"
     if now_et.weekday() >= 5:  # Saturday/Sunday
         return "closed"
@@ -473,6 +472,31 @@ def afterhours():
         entry = _afterhours_cache.get(sym)
         out[sym] = entry["data"] if entry else {"ok": True, "active": False}
     return jsonify(out)
+
+
+@app.route("/api/debug/afterhours")
+def afterhours_debug():
+    """Diagnostic snapshot — what the server thinks is happening right
+    now, without having to dig through logs."""
+    now = time.time()
+    cache_ages = {
+        sym: round(now - entry["ts"], 1)
+        for sym, entry in _afterhours_cache.items()
+    }
+    try:
+        now_et = datetime.now(ZoneInfo("America/New_York")).isoformat()
+        tz_error = None
+    except Exception as e:
+        now_et = None
+        tz_error = repr(e)
+    return jsonify({
+        "computed_session": market_session_now(),
+        "server_time_et": now_et,
+        "timezone_error": tz_error,
+        "twelve_data_key_set": bool(TWELVE_DATA_API_KEY),
+        "known_symbols": sorted(_known_symbols),
+        "afterhours_cache_seconds_old": cache_ages,
+    })
 
 
 if __name__ == "__main__":
