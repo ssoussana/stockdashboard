@@ -103,6 +103,12 @@
   .chg.up{color:var(--green);}
   .chg.down{color:var(--red);}
   .spark{margin-top:8px;display:block;}
+  .sma{
+    margin-top:8px;padding-top:8px;border-top:1px solid var(--border);
+    font-family:var(--mono);font-size:11px;color:var(--muted-dim);
+  }
+  .sma .up{color:var(--green);}
+  .sma .down{color:var(--red);}
   .card .status-pill{font-family:var(--mono);font-size:10px;color:var(--muted-dim);}
   .card.err{opacity:.55;}
   .card.err .price{color:var(--muted);font-size:13px;}
@@ -118,7 +124,7 @@
     <div>
       <p class="eyebrow">AI Infrastructure Watch</p>
       <h1>Market Pulse</h1>
-      <p class="sub">13 tickers &middot; sentiment gauge &middot; auto-refresh every 5 min</p>
+      <p class="sub">13 tickers &middot; sentiment gauge &middot; auto-refresh every 1 min</p>
     </div>
     <div class="status">
       <span class="dot"></span>
@@ -169,8 +175,8 @@
 
 <script>
 const SYMBOLS = ["PLTR","NVDA","CLS","NBIS","HOOD","SPY","QQQ","GLW","CRDO","COHR","SOXL","DRAM","IREN"];
-const REFRESH_MS = 5 * 60 * 1000;
-const state = { apiKey: null, history: {}, secondsLeft: REFRESH_MS/1000 };
+const REFRESH_MS = 60 * 1000;
+const state = { history: {}, sma: null, lastPrice: {}, secondsLeft: REFRESH_MS/1000 };
 
 const grid = document.getElementById('stockGrid');
 const updatedEl = document.getElementById('updated');
@@ -188,6 +194,7 @@ function buildCards(){
       <div class="price" id="price-${sym}">&mdash;</div>
       <div class="chg" id="chg-${sym}">waiting for data</div>
       <svg class="spark" id="spark-${sym}" width="100%" height="30" viewBox="0 0 200 30" preserveAspectRatio="none"></svg>
+      <div class="sma" id="sma-${sym}">SMA loading&hellip;</div>
     </div>
   `).join('');
 }
@@ -244,7 +251,37 @@ async function refreshStocks(){
     state.history[sym].push(q.c);
     if(state.history[sym].length > 60) state.history[sym].shift();
     renderSpark(sym);
+    state.lastPrice[sym] = q.c;
+    renderSma(sym);
   });
+}
+
+// ---------- SMA (20/50 day) ----------
+async function refreshSma(){
+  try{
+    const res = await fetch('/api/sma');
+    state.sma = await res.json();
+  }catch(e){
+    state.sma = null;
+  }
+  SYMBOLS.forEach(renderSma);
+}
+
+function renderSma(sym){
+  const el = document.getElementById(`sma-${sym}`);
+  const s = state.sma && state.sma[sym];
+  if(!s || !s.ok){ el.textContent = 'SMA n/a'; return; }
+  const price = state.lastPrice[sym];
+  const parts = [];
+  if(s.sma20 != null){
+    const cls = price != null ? (price >= s.sma20 ? 'up' : 'down') : '';
+    parts.push(`<span class="${cls}">20d $${s.sma20.toFixed(2)}</span>`);
+  }
+  if(s.sma50 != null){
+    const cls = price != null ? (price >= s.sma50 ? 'up' : 'down') : '';
+    parts.push(`<span class="${cls}">50d $${s.sma50.toFixed(2)}</span>`);
+  }
+  el.innerHTML = parts.join('&nbsp;&nbsp;&middot;&nbsp;&nbsp;') || 'SMA n/a';
 }
 
 // ---------- Fear & Greed ----------
@@ -324,10 +361,14 @@ function tickCountdown(){
   countdownEl.textContent = `next in ${m}:${s.toString().padStart(2,'0')}`;
 }
 
+const SMA_REFRESH_MS = 60 * 60 * 1000; // matches backend's slower daily-data cache
+
 (async function init(){
   buildCards();
   refreshAll();
+  refreshSma();
   setInterval(refreshAll, REFRESH_MS);
+  setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(tickCountdown, 1000);
 })();
 </script>

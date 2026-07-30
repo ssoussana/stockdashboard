@@ -13,6 +13,8 @@ Setup:
 Then open http://localhost:5000
 """
 
+import csv
+import io
 import os
 import time
 import requests
@@ -32,6 +34,11 @@ SYMBOLS = ["PLTR", "NVDA", "CLS", "NBIS", "HOOD", "SPY", "QQQ",
 
 CACHE_SECONDS = 60  # shared across all visitors, protects your Finnhub rate limit
 _cache = {"data": None, "ts": 0}
+
+# SMA is daily data, doesn't need to update every minute — cache it longer
+# to keep load on Stooq (a free, no-key data source) light.
+SMA_CACHE_SECONDS = 60 * 60 * 4  # 4 hours
+_sma_cache = {"data": None, "ts": 0}
 
 app = Flask(__name__, static_folder=".")
 
@@ -60,11 +67,56 @@ def quotes():
             if data.get("c") is None:
                 raise ValueError("no data")
             out[sym] = {"ok": True, **data}
-        except Exception as e:
-            out[sym] = {"ok": False, "error": str(e)}
+        except requests.exceptions.HTTPError:
+            # Report only the status code — never the underlying exception,
+            # which embeds the full request URL including the API key.
+            out[sym] = {"ok": False, "error": f"HTTP {r.status_code}"}
+        except Exception:
+            out[sym] = {"ok": False, "error": "fetch failed"}
 
     _cache["data"] = out
     _cache["ts"] = now
+    return jsonify(out)
+
+
+def fetch_sma(sym):
+    """20/50-day SMA from Stooq's free daily CSV — no API key needed.
+    Finnhub's free tier doesn't expose the candle data required for this."""
+    r = requests.get(
+        "https://stooq.com/q/d/l/",
+        params={"s": f"{sym.lower()}.us", "i": "d"},
+        timeout=6,
+    )
+    r.raise_for_status()
+    text = r.text.strip()
+    if not text or text.startswith("N/D") or "Exceeded" in text:
+        raise ValueError("no data")
+
+    rows = list(csv.DictReader(io.StringIO(text)))
+    closes = [float(row["Close"]) for row in rows if row.get("Close")]
+    if len(closes) < 20:
+        raise ValueError("insufficient history")
+
+    sma20 = sum(closes[-20:]) / 20
+    sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else None
+    return {"sma20": round(sma20, 2), "sma50": round(sma50, 2) if sma50 else None}
+
+
+@app.route("/api/sma")
+def sma():
+    now = time.time()
+    if _sma_cache["data"] is not None and (now - _sma_cache["ts"]) < SMA_CACHE_SECONDS:
+        return jsonify(_sma_cache["data"])
+
+    out = {}
+    for sym in SYMBOLS:
+        try:
+            out[sym] = {"ok": True, **fetch_sma(sym)}
+        except Exception:
+            out[sym] = {"ok": False}
+
+    _sma_cache["data"] = out
+    _sma_cache["ts"] = now
     return jsonify(out)
 
 
