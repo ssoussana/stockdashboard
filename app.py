@@ -84,51 +84,71 @@ def quotes():
     return jsonify(out)
 
 
-def fetch_sma_one(sym):
-    """Daily closes from Twelve Data's free tier, used to compute 20/50-day SMA.
-    (Finnhub's free tier doesn't expose the candle data this needs, and Stooq
-    blocks requests from most cloud hosts, so this uses a third provider.)"""
+TWELVE_DATA_BATCH_SIZE = 8   # free-tier limit: 8 credits/minute
+TWELVE_DATA_BATCH_PAUSE = 61  # seconds — wait out the per-minute window
+
+
+def fetch_sma_batch(symbols):
+    """One HTTP call per batch of up to 8 symbols — Twelve Data accepts
+    comma-separated symbols in a single request, so this needs far fewer
+    round trips than fetching one symbol at a time."""
     r = requests.get(
         "https://api.twelvedata.com/time_series",
         params={
-            "symbol": sym,
+            "symbol": ",".join(symbols),
             "interval": "1day",
             "outputsize": 50,
             "apikey": TWELVE_DATA_API_KEY,
         },
-        timeout=8,
+        timeout=15,
     )
-    data = r.json()
-    if data.get("status") == "error":
-        raise ValueError(data.get("message", "twelve data error"))
-    values = data.get("values")
-    if not values:
-        raise ValueError("no data returned")
+    payload = r.json()
+    # A single-symbol request returns one object with a top-level "values"
+    # key; a multi-symbol request returns an object keyed by symbol. Normalize
+    # to the latter shape so the parsing below is the same either way.
+    if len(symbols) == 1 and "values" in payload:
+        payload = {symbols[0]: payload}
 
-    closes = [float(v["close"]) for v in reversed(values)]  # oldest → newest
-    if len(closes) < 20:
-        raise ValueError(f"only {len(closes)} days of history returned")
-
-    sma20 = sum(closes[-20:]) / 20
-    sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else None
-    return {"sma20": round(sma20, 2), "sma50": round(sma50, 2) if sma50 else None}
-
-
-TWELVE_DATA_BATCH_SIZE = 8   # free-tier limit: 8 requests/minute
-TWELVE_DATA_BATCH_PAUSE = 61  # seconds — wait out the per-minute window
+    out = {}
+    for sym in symbols:
+        entry = payload.get(sym)
+        try:
+            if not entry:
+                raise ValueError("symbol missing from batch response")
+            if entry.get("status") == "error":
+                raise ValueError(entry.get("message", "twelve data error"))
+            values = entry.get("values")
+            if not values:
+                raise ValueError("no data returned")
+            closes = [float(v["close"]) for v in reversed(values)]  # oldest → newest
+            if len(closes) < 20:
+                raise ValueError(f"only {len(closes)} days of history returned")
+            sma20 = sum(closes[-20:]) / 20
+            sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else None
+            out[sym] = {"ok": True, "sma20": round(sma20, 2),
+                        "sma50": round(sma50, 2) if sma50 else None}
+        except Exception as e:
+            # No secret is embedded in this error (unlike the Finnhub
+            # handling above), so it's safe to surface directly.
+            out[sym] = {"ok": False, "error": str(e)}
+    return out
 
 
 def fetch_sma_all(symbols):
-    out = {}
+    """Fetches every symbol in batches, writing results into the shared
+    cache after EACH batch — not just at the end — so results (or a real
+    error) show up within seconds instead of only after the full pass,
+    and so a mid-run restart doesn't erase progress that already landed."""
+    out = dict(_sma_cache["data"] or {})
     for i in range(0, len(symbols), TWELVE_DATA_BATCH_SIZE):
         batch = symbols[i:i + TWELVE_DATA_BATCH_SIZE]
-        for sym in batch:
-            try:
-                out[sym] = {"ok": True, **fetch_sma_one(sym)}
-            except Exception as e:
-                # No secret is embedded in this error (unlike the Finnhub
-                # handling above), so it's safe to surface directly.
-                out[sym] = {"ok": False, "error": str(e)}
+        try:
+            out.update(fetch_sma_batch(batch))
+        except Exception as e:
+            for sym in batch:
+                out[sym] = {"ok": False, "error": f"batch request failed: {e}"}
+        _sma_cache["data"] = dict(out)
+        _sma_cache["ts"] = time.time()
         if i + TWELVE_DATA_BATCH_SIZE < len(symbols):
             time.sleep(TWELVE_DATA_BATCH_PAUSE)
     return out
@@ -141,28 +161,33 @@ def sma():
         return jsonify(out)
 
     if _sma_cache["data"] is None:
-        # Background refresh hasn't completed its first pass yet (takes
-        # roughly a minute the very first time, due to free-tier pacing).
-        out = {sym: {"ok": False, "error": "still loading, try again shortly"} for sym in SYMBOLS}
+        elapsed = int(time.time() - _sma_status["attempt_started"])
+        out = {sym: {"ok": False, "error": f"still loading ({elapsed}s so far)"} for sym in SYMBOLS}
         return jsonify(out)
 
     return jsonify(_sma_cache["data"])
+
+
+_sma_status = {"attempt_started": time.time()}
 
 
 def _sma_background_loop():
     """Runs forever in its own thread, refreshing the SMA cache on a slow
     cadence. Kept out of the request/response cycle entirely — the pacing
     this needs (to respect Twelve Data's free-tier rate limit) would
-    otherwise make /api/sma block for over a minute and get killed by the
-    host's request timeout, which is exactly what happened before this."""
+    otherwise make /api/sma block long enough to get killed by the host's
+    request timeout, which is exactly what happened before this."""
     while True:
         if TWELVE_DATA_API_KEY:
+            _sma_status["attempt_started"] = time.time()
             try:
-                _sma_cache["data"] = fetch_sma_all(SYMBOLS)
-                _sma_cache["ts"] = time.time()
+                fetch_sma_all(SYMBOLS)  # writes into _sma_cache incrementally as it runs
             except Exception:
-                pass  # leave the previous cached data in place, try again next cycle
-        time.sleep(SMA_CACHE_SECONDS)
+                pass
+        # If nothing has landed in the cache at all, this was likely a
+        # connectivity problem (same failure mode Stooq had) rather than a
+        # normal completed pass — retry soon instead of waiting 4 hours.
+        time.sleep(SMA_CACHE_SECONDS if _sma_cache["data"] is not None else 5 * 60)
 
 
 threading.Thread(target=_sma_background_loop, daemon=True).start()
