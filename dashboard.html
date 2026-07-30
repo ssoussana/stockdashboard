@@ -270,7 +270,12 @@ async function refreshSma(){
 function renderSma(sym){
   const el = document.getElementById(`sma-${sym}`);
   const s = state.sma && state.sma[sym];
-  if(!s || !s.ok){ el.textContent = 'SMA n/a'; return; }
+  if(!s || !s.ok){
+    el.textContent = 'SMA n/a';
+    el.title = (s && s.error) || 'no response from /api/sma';
+    return;
+  }
+  el.title = '';
   const price = state.lastPrice[sym];
   const parts = [];
   if(s.sma20 != null){

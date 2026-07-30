@@ -79,23 +79,36 @@ def quotes():
     return jsonify(out)
 
 
+STOOQ_HEADERS = {
+    # Stooq's anti-bot filtering often rejects the default python-requests
+    # User-Agent (and can be stricter about cloud-hosting IP ranges like
+    # Render's). A normal browser UA gets past this in most cases.
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0.0.0 Safari/537.36")
+}
+
+
 def fetch_sma(sym):
     """20/50-day SMA from Stooq's free daily CSV — no API key needed.
     Finnhub's free tier doesn't expose the candle data required for this."""
     r = requests.get(
         "https://stooq.com/q/d/l/",
         params={"s": f"{sym.lower()}.us", "i": "d"},
+        headers=STOOQ_HEADERS,
         timeout=6,
     )
     r.raise_for_status()
     text = r.text.strip()
     if not text or text.startswith("N/D") or "Exceeded" in text:
-        raise ValueError("no data")
+        raise ValueError(f"stooq returned: {text[:80]!r}")
+    if text.lstrip().startswith("<"):
+        raise ValueError("stooq returned HTML, not CSV (likely blocked)")
 
     rows = list(csv.DictReader(io.StringIO(text)))
     closes = [float(row["Close"]) for row in rows if row.get("Close")]
     if len(closes) < 20:
-        raise ValueError("insufficient history")
+        raise ValueError(f"only {len(closes)} rows of history returned")
 
     sma20 = sum(closes[-20:]) / 20
     sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else None
@@ -112,8 +125,10 @@ def sma():
     for sym in SYMBOLS:
         try:
             out[sym] = {"ok": True, **fetch_sma(sym)}
-        except Exception:
-            out[sym] = {"ok": False}
+        except Exception as e:
+            # Stooq has no secret/key involved, so it's safe to surface
+            # the real reason here (unlike the Finnhub error handling above).
+            out[sym] = {"ok": False, "error": str(e)}
 
     _sma_cache["data"] = out
     _sma_cache["ts"] = now
