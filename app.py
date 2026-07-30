@@ -18,6 +18,7 @@ Then open http://localhost:5000
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 
@@ -100,21 +101,41 @@ def fetch_quote_one(sym):
         return {"ok": False, "error": "fetch failed"}
 
 
+_quote_executor = ThreadPoolExecutor(max_workers=8)
+
+
 def get_quote_cached(sym):
-    now = time.time()
     entry = _quote_cache.get(sym)
-    if entry and (now - entry["ts"]) < CACHE_SECONDS:
+    if entry and (time.time() - entry["ts"]) < CACHE_SECONDS:
         return entry["data"]
-    data = fetch_quote_one(sym)
-    _quote_cache[sym] = {"data": data, "ts": now}
-    return data
+    return None
 
 
 @app.route("/api/quotes")
 def quotes():
     symbols = parse_symbols_param()
     register_known_symbols(symbols)
-    out = {sym: get_quote_cached(sym) for sym in symbols}
+
+    out = {}
+    to_fetch = []
+    for sym in symbols:
+        cached = get_quote_cached(sym)
+        if cached is not None:
+            out[sym] = cached
+        else:
+            to_fetch.append(sym)
+
+    if to_fetch:
+        # Fetch cache misses concurrently rather than one at a time — with
+        # a growing watchlist, sequential fetching was slow enough to trip
+        # the host's request timeout and crash the worker mid-request,
+        # wiping other in-memory data (including SMA/RSI) along with it.
+        results = list(_quote_executor.map(fetch_quote_one, to_fetch))
+        now = time.time()
+        for sym, data in zip(to_fetch, results):
+            _quote_cache[sym] = {"data": data, "ts": now}
+            out[sym] = data
+
     return jsonify(out)
 
 

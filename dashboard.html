@@ -135,8 +135,10 @@
   .spark{margin-top:8px;display:block;}
   .sma{
     margin-top:8px;padding-top:8px;border-top:1px solid var(--border);
-    font-family:var(--mono);font-size:11px;color:var(--muted-dim);
+    font-family:var(--mono);font-size:11px;color:var(--muted);
+    display:flex;flex-wrap:wrap;gap:4px 10px;
   }
+  .sma .stat{white-space:nowrap;}
   .sma .up{color:var(--green);}
   .sma .down{color:var(--red);}
   .sma .rsi-hot{color:var(--red);}
@@ -365,17 +367,17 @@ function renderSma(sym){
   const parts = [];
   if(s.sma20 != null){
     const cls = price != null ? (price >= s.sma20 ? 'up' : 'down') : '';
-    parts.push(`<span class="${cls}">20d $${s.sma20.toFixed(2)}</span>`);
+    parts.push(`<span class="stat ${cls}">20d&nbsp;$${s.sma20.toFixed(2)}</span>`);
   }
   if(s.sma50 != null){
     const cls = price != null ? (price >= s.sma50 ? 'up' : 'down') : '';
-    parts.push(`<span class="${cls}">50d $${s.sma50.toFixed(2)}</span>`);
+    parts.push(`<span class="stat ${cls}">50d&nbsp;$${s.sma50.toFixed(2)}</span>`);
   }
   if(s.rsi14 != null){
     const cls = s.rsi14 >= 70 ? 'rsi-hot' : (s.rsi14 <= 30 ? 'rsi-cold' : '');
-    parts.push(`<span class="${cls}">RSI ${s.rsi14.toFixed(1)}</span>`);
+    parts.push(`<span class="stat ${cls}">RSI&nbsp;${s.rsi14.toFixed(1)}</span>`);
   }
-  el.innerHTML = parts.join('&nbsp;&nbsp;&middot;&nbsp;&nbsp;') || 'SMA n/a';
+  el.innerHTML = parts.join('') || 'SMA n/a';
 
   // Price color: above both SMAs = bullish setup, below both = bearish,
   // between them = mixed. A heuristic, not a signal to act on.
