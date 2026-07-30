@@ -126,6 +126,9 @@
   }
   .remove-btn:hover{color:var(--red);background:var(--red-dim);}
   .price{font-family:var(--sans);font-weight:700;font-size:22px;margin-top:6px;}
+  .price.signal-up{color:var(--green);}
+  .price.signal-down{color:var(--red);}
+  .price.signal-mixed{color:var(--amber);}
   .chg{font-family:var(--mono);font-size:12.5px;margin-top:3px;}
   .chg.up{color:var(--green);}
   .chg.down{color:var(--red);}
@@ -136,6 +139,8 @@
   }
   .sma .up{color:var(--green);}
   .sma .down{color:var(--red);}
+  .sma .rsi-hot{color:var(--red);}
+  .sma .rsi-cold{color:var(--green);}
   .card .status-pill{font-family:var(--mono);font-size:10px;color:var(--muted-dim);}
   .card.err{opacity:.55;}
   .card.err .price{color:var(--muted);font-size:13px;}
@@ -200,7 +205,8 @@
   <div class="grid" id="stockGrid"></div>
 
   <footer>
-    Quotes via Finnhub &middot; Sentiment via feargreedchart.com &middot; Sparklines reflect this session only
+    Quotes via Finnhub &middot; Sentiment via feargreedchart.com &middot; Sparklines reflect this session only<br>
+    Price color: green above both SMAs, red below both, amber mixed &middot; RSI: green &le;30 (oversold), red &ge;70 (overbought) &middot; not financial advice
   </footer>
 </div>
 
@@ -346,10 +352,12 @@ async function refreshSma(){
 
 function renderSma(sym){
   const el = document.getElementById(`sma-${sym}`);
+  const priceEl = document.getElementById(`price-${sym}`);
   const s = state.sma && state.sma[sym];
   if(!s || !s.ok){
     el.textContent = 'SMA n/a';
     el.title = (s && s.error) || 'no response from /api/sma';
+    if(priceEl) priceEl.classList.remove('signal-up','signal-down','signal-mixed');
     return;
   }
   el.title = '';
@@ -363,7 +371,20 @@ function renderSma(sym){
     const cls = price != null ? (price >= s.sma50 ? 'up' : 'down') : '';
     parts.push(`<span class="${cls}">50d $${s.sma50.toFixed(2)}</span>`);
   }
+  if(s.rsi14 != null){
+    const cls = s.rsi14 >= 70 ? 'rsi-hot' : (s.rsi14 <= 30 ? 'rsi-cold' : '');
+    parts.push(`<span class="${cls}">RSI ${s.rsi14.toFixed(1)}</span>`);
+  }
   el.innerHTML = parts.join('&nbsp;&nbsp;&middot;&nbsp;&nbsp;') || 'SMA n/a';
+
+  // Price color: above both SMAs = bullish setup, below both = bearish,
+  // between them = mixed. A heuristic, not a signal to act on.
+  if(priceEl && price != null && s.sma20 != null && s.sma50 != null){
+    priceEl.classList.remove('signal-up','signal-down','signal-mixed');
+    if(price >= s.sma20 && price >= s.sma50) priceEl.classList.add('signal-up');
+    else if(price < s.sma20 && price < s.sma50) priceEl.classList.add('signal-down');
+    else priceEl.classList.add('signal-mixed');
+  }
 }
 
 // ---------- Fear & Greed ----------

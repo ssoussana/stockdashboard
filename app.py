@@ -58,14 +58,19 @@ def parse_symbols_param():
 
 
 def register_known_symbols(symbols):
-    """Adds newly-seen symbols to the shared watch set and, if any are
-    genuinely new, wakes the SMA background loop so it picks them up on
-    its next pass soon rather than after a full 4-hour wait."""
+    """Adds newly-seen symbols to the shared watch set, kicks off an
+    immediate one-off SMA/RSI fetch for each brand-new one (so it doesn't
+    have to wait its turn in the next scheduled pass), and wakes the
+    background loop so the new symbol is included in future full passes."""
     with _known_lock:
         new = set(symbols) - _known_symbols
         if new:
             _known_symbols.update(new)
-            _wake_event.set()
+    if new:
+        _wake_event.set()
+        if TWELVE_DATA_API_KEY:
+            for sym in new:
+                threading.Thread(target=fetch_sma_immediate, args=(sym,), daemon=True).start()
 
 app = Flask(__name__, static_folder=".")
 
@@ -145,6 +150,26 @@ TWELVE_DATA_BATCH_SIZE = 8   # free-tier limit: 8 credits/minute
 TWELVE_DATA_BATCH_PAUSE = 61  # seconds — wait out the per-minute window
 
 
+def compute_rsi14(closes, period=14):
+    """Standard 14-day RSI using Wilder's smoothing method."""
+    if len(closes) < period + 1:
+        return None
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 1)
+
+
 def fetch_sma_batch(symbols):
     """One HTTP call per batch of up to 8 symbols — Twelve Data accepts
     comma-separated symbols in a single request, so this needs far fewer
@@ -156,7 +181,7 @@ def fetch_sma_batch(symbols):
         params={
             "symbol": ",".join(symbols),
             "interval": "1day",
-            "outputsize": 50,
+            "outputsize": 100,  # a bit more than SMA needs, for RSI to converge well
             "apikey": TWELVE_DATA_API_KEY,
         },
         timeout=(5, 15),  # (connect timeout, read timeout) — explicit, not a single shared value
@@ -185,13 +210,34 @@ def fetch_sma_batch(symbols):
                 raise ValueError(f"only {len(closes)} days of history returned")
             sma20 = sum(closes[-20:]) / 20
             sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else None
+            rsi14 = compute_rsi14(closes)
             out[sym] = {"ok": True, "sma20": round(sma20, 2),
-                        "sma50": round(sma50, 2) if sma50 else None}
+                        "sma50": round(sma50, 2) if sma50 else None,
+                        "rsi14": rsi14}
         except Exception as e:
             # No secret is embedded in this error (unlike the Finnhub
             # handling above), so it's safe to surface directly.
             out[sym] = {"ok": False, "error": str(e)}
     return out
+
+
+_immediate_lock = threading.Lock()  # serializes immediate fetches so rapid
+                                     # successive adds don't burst past the
+                                     # free-tier rate limit
+
+
+def fetch_sma_immediate(sym):
+    """Fetches SMA/RSI for one newly-added symbol right away, independent
+    of the scheduled background pass — runs in its own short-lived thread
+    so the request that added the symbol isn't held up waiting on it."""
+    with _immediate_lock:
+        print(f"[sma] immediate fetch for new symbol {sym}", flush=True)
+        try:
+            batch_out = fetch_sma_batch([sym])
+            _sma_cache[sym] = {"data": batch_out[sym], "ts": time.time()}
+        except Exception as e:
+            print(f"[sma] immediate fetch for {sym} failed: {e!r}", flush=True)
+            _sma_cache[sym] = {"data": {"ok": False, "error": f"immediate fetch failed: {e}"}, "ts": time.time()}
 
 
 def fetch_sma_all(symbols):
