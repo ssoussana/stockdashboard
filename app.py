@@ -214,6 +214,22 @@ def acquire_twelvedata_credits(n):
         time.sleep(2)
 
 
+def twelvedata_get(url, params, timeout=(5, 15)):
+    """GET with one automatic retry on a 429. Our credit tracker only
+    knows about calls made by *this* process — during a Render deploy
+    transition, the outgoing and incoming workers can briefly run at the
+    same time, each thinking it has the full budget, and together exceed
+    the real account-wide limit. That's a real, if narrow, gap in a
+    purely in-memory rate limiter; retrying once after a short wait
+    covers it without needing a shared external store."""
+    r = _http.get(url, params=params, timeout=timeout)
+    if r.status_code == 429:
+        print(f"[twelvedata] 429 rate limited, waiting 20s and retrying once: {url}", flush=True)
+        time.sleep(20)
+        r = _http.get(url, params=params, timeout=timeout)
+    return r
+
+
 def compute_rsi14(closes, period=14):
     """Standard 14-day RSI using Wilder's smoothing method."""
     if len(closes) < period + 1:
@@ -241,7 +257,7 @@ def fetch_sma_batch(symbols):
     acquire_twelvedata_credits(len(symbols))
     print(f"[sma] requesting batch: {symbols}", flush=True)
     t0 = time.time()
-    r = _http.get(
+    r = twelvedata_get(
         "https://api.twelvedata.com/time_series",
         params={
             "symbol": ",".join(symbols),
@@ -249,7 +265,6 @@ def fetch_sma_batch(symbols):
             "outputsize": 100,  # a bit more than SMA needs, for RSI to converge well
             "apikey": TWELVE_DATA_API_KEY,
         },
-        timeout=(5, 15),  # (connect timeout, read timeout) — explicit, not a single shared value
     )
     print(f"[sma] batch {symbols} responded in {time.time()-t0:.1f}s, status {r.status_code}", flush=True)
     payload = r.json()
@@ -412,14 +427,13 @@ def fetch_afterhours_batch(symbols):
     alongside the regular session's numbers."""
     acquire_twelvedata_credits(len(symbols))
     print(f"[afterhours] requesting batch: {symbols}", flush=True)
-    r = _http.get(
+    r = twelvedata_get(
         "https://api.twelvedata.com/quote",
         params={
             "symbol": ",".join(symbols),
             "prepost": "true",
             "apikey": TWELVE_DATA_API_KEY,
         },
-        timeout=(5, 15),
     )
     print(f"[afterhours] batch {symbols} responded, status {r.status_code}", flush=True)
     payload = r.json()
@@ -589,10 +603,9 @@ def fetch_macro_all():
     out = {}
     for key, symbol in MACRO_SYMBOLS.items():
         try:
-            r = _http.get(
+            r = twelvedata_get(
                 "https://api.twelvedata.com/quote",
                 params={"symbol": symbol, "apikey": TWELVE_DATA_API_KEY},
-                timeout=(5, 15),
             )
             data = r.json()
             if data.get("status") == "error" or data.get("close") is None:
