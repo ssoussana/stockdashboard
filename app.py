@@ -57,10 +57,12 @@ DEFAULT_SYMBOLS = ["PLTR", "NVDA", "CLS", "NBIS", "HOOD", "SPY", "QQQ",
 
 # The watchlist is shared — everyone viewing the dashboard sees the same
 # list, and adding/removing a ticker affects everyone's view. Persisted to
-# a local JSON file so it survives ordinary restarts (though not necessarily
-# a fresh deploy on hosts with an ephemeral filesystem, like Render's free
-# tier — ordinary worker recycling keeps the same disk, a new deploy may not).
-WATCHLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watchlist.json")
+# a JSON file. DATA_DIR defaults to the app's own directory (fine locally,
+# but that directory gets rebuilt from scratch on every real Render deploy
+# — only ordinary restarts within the same deploy keep it). Set DATA_DIR to
+# a mounted persistent disk's path (e.g. /data) so this survives deploys too.
+DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
 _watchlist_lock = threading.Lock()
 
 
@@ -87,6 +89,7 @@ def save_shared_watchlist():
 
 
 _shared_watchlist = load_shared_watchlist()
+print(f"[watchlist] using {WATCHLIST_FILE} (DATA_DIR={'set' if 'DATA_DIR' in os.environ else 'default, NOT persistent across deploys'})", flush=True)
 
 # One shared connection pool for every outbound call, instead of `requests`
 # implicitly building a fresh connection/SSL context on every single get().
