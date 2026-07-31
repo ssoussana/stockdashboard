@@ -735,10 +735,15 @@ def fetch_movers_list(endpoint):
         params={"apikey": FMP_API_KEY},
         timeout=(5, 15),
     )
+    if r.text.lstrip().startswith("<"):
+        # Same failure mode we hit with Stooq earlier — some providers block
+        # cloud-hosting IPs by silently returning an HTML block/challenge
+        # page instead of a proper error status.
+        raise ValueError(f"got HTML instead of JSON (likely blocked) — first 150 chars: {r.text[:150]!r}")
     r.raise_for_status()
     data = r.json()
     if not isinstance(data, list):
-        raise ValueError(f"unexpected response shape: {str(data)[:120]}")
+        raise ValueError(f"unexpected response shape: {str(data)[:150]}")
     return [
         {
             "symbol": item.get("symbol"),
@@ -752,12 +757,22 @@ def fetch_movers_list(endpoint):
     ]
 
 
+_movers_status = {"last_attempt": None, "last_error": None}
+
+
 def fetch_movers_all():
+    _movers_status["last_attempt"] = time.time()
     print("[movers] requesting biggest-gainers and biggest-losers", flush=True)
-    gainers = fetch_movers_list("biggest-gainers")
-    losers = fetch_movers_list("biggest-losers")
+    try:
+        gainers = fetch_movers_list("biggest-gainers")
+        losers = fetch_movers_list("biggest-losers")
+    except Exception as e:
+        _movers_status["last_error"] = str(e)
+        print(f"[movers] fetch failed: {e!r}", flush=True)
+        raise
     _movers_cache["data"] = {"gainers": gainers, "losers": losers}
     _movers_cache["ts"] = time.time()
+    _movers_status["last_error"] = None
     print(f"[movers] updated: {len(gainers)} gainers, {len(losers)} losers", flush=True)
 
 
@@ -776,6 +791,8 @@ def movers_debug():
         "fmp_key_set": bool(FMP_API_KEY),
         "cache_seconds_old": round(time.time() - _movers_cache["ts"], 1) if _movers_cache["data"] else None,
         "cached_data": _movers_cache["data"],
+        "last_attempt_seconds_ago": round(time.time() - _movers_status["last_attempt"], 1) if _movers_status["last_attempt"] else None,
+        "last_error": _movers_status["last_error"],
     })
 
 
