@@ -616,13 +616,20 @@ def fetch_afterhours_batch(symbols):
                 raise ValueError("symbol missing from batch response")
             if entry.get("status") == "error":
                 raise ValueError(entry.get("message", "twelve data error"))
-            # The "is_extended_hours" flag documented by Twelve Data doesn't
-            # reliably appear in real responses — confirmed by inspecting a
-            # live response that had real extended_price/extended_change
-            # data but no is_extended_hours field at all. The presence of
-            # extended_price itself is the reliable signal instead.
+            # A present extended_price is NOT reliable on its own — confirmed
+            # via a live response where extended_price/extended_change/
+            # extended_timestamp were all just an exact echo of the regular
+            # session's close/timestamp (extended_change was "0" and
+            # extended_timestamp == last_quote_at), meaning no real
+            # after-hours trade had actually happened yet. Requiring the
+            # extended timestamp to be strictly newer than the regular
+            # session's last quote is what actually distinguishes a real
+            # print from this kind of placeholder echo.
             price = entry.get("extended_price")
-            if price is None:
+            ext_ts = entry.get("extended_timestamp")
+            reg_ts = entry.get("last_quote_at") or entry.get("timestamp")
+            is_real = price is not None and ext_ts is not None and reg_ts is not None and ext_ts > reg_ts
+            if not is_real:
                 out[sym] = {"ok": True, "active": False}
                 continue
             out[sym] = {"ok": True, "active": True, "price": round(float(price), 2)}
