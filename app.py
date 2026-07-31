@@ -102,9 +102,40 @@ _http = requests.Session()
 CACHE_SECONDS = 60  # per-symbol, shared across all visitors requesting that symbol
 _quote_cache = {}   # symbol -> {"data": {...}, "ts": float}
 
+
+def load_json_cache(filename):
+    """Generic loader for the disk-backed caches below. Returns {} on any
+    failure (missing file, bad JSON, no DATA_DIR mounted yet) so this is
+    always safe to call at startup regardless of whether a persistent disk
+    is actually attached."""
+    path = os.path.join(DATA_DIR, filename)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"[cache] failed to load {path}: {e!r}", flush=True)
+        return {}
+
+
+def save_json_cache(filename, data):
+    path = os.path.join(DATA_DIR, filename)
+    try:
+        with open(path, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[cache] failed to save {path}: {e!r}", flush=True)
+
+
 # SMA is daily data, doesn't need to update every minute — cache it longer.
+# Loaded from disk at startup so a fresh deploy shows the last known values
+# immediately (even if a bit stale) instead of blank "not fetched yet" while
+# a new background pass completes — only actually persists across deploys
+# if DATA_DIR points at a mounted disk, same as the watchlist file above.
 SMA_CACHE_SECONDS = 60 * 60 * 4  # 4 hours
-_sma_cache = {}      # symbol -> {"data": {...}, "ts": float}
+SMA_CACHE_FILE = "sma_cache.json"
+_sma_cache = load_json_cache(SMA_CACHE_FILE)      # symbol -> {"data": {...}, "ts": float}
 
 # The full set of symbols anyone's watchlist currently includes. Grows as
 # people add tickers; the SMA background loop iterates over this each pass.
@@ -464,6 +495,7 @@ def fetch_sma_all(symbols):
         now = time.time()
         for sym, data in batch_out.items():
             _sma_cache[sym] = {"data": data, "ts": now}
+        save_json_cache(SMA_CACHE_FILE, _sma_cache)
         _sma_status["current_step"] = "batch complete"
     _sma_status["current_batch"] = None
     print("[sma] pass complete", flush=True)
@@ -735,7 +767,8 @@ threading.Thread(target=_movers_background_loop, daemon=True).start()
 
 # ---------- Macro (crude oil, 10-year Treasury yield) ----------
 MACRO_CACHE_SECONDS = 60 * 60  # FRED itself only updates once per business day
-_macro_cache = {"data": None, "ts": 0}
+MACRO_CACHE_FILE = "macro_cache.json"
+_macro_cache = load_json_cache(MACRO_CACHE_FILE) or {"data": None, "ts": 0}
 MACRO_SERIES = {"crude_oil": "DCOILWTICO", "treasury_10y": "DGS10"}
 MACRO_LABELS = {"crude_oil": "Crude Oil, WTI $/barrel (FRED)", "treasury_10y": "10Y Treasury Yield (FRED)"}
 
@@ -797,6 +830,7 @@ def fetch_macro_all():
             out[key] = {"ok": False, "error": str(e)}
     _macro_cache["data"] = out
     _macro_cache["ts"] = time.time()
+    save_json_cache(MACRO_CACHE_FILE, _macro_cache)
     print(f"[macro] updated: {out}", flush=True)
 
 
