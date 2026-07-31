@@ -23,6 +23,7 @@ Then open http://localhost:5000
 """
 
 import collections
+import json
 import os
 import threading
 import time
@@ -54,6 +55,39 @@ FRED_API_KEY = os.environ.get("FRED_API_KEY")
 DEFAULT_SYMBOLS = ["PLTR", "NVDA", "CLS", "NBIS", "HOOD", "SPY", "QQQ",
                     "GLW", "CRDO", "COHR", "SOXL", "DRAM", "IREN"]
 
+# The watchlist is shared — everyone viewing the dashboard sees the same
+# list, and adding/removing a ticker affects everyone's view. Persisted to
+# a local JSON file so it survives ordinary restarts (though not necessarily
+# a fresh deploy on hosts with an ephemeral filesystem, like Render's free
+# tier — ordinary worker recycling keeps the same disk, a new deploy may not).
+WATCHLIST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watchlist.json")
+_watchlist_lock = threading.Lock()
+
+
+def load_shared_watchlist():
+    try:
+        with open(WATCHLIST_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, list) and data:
+            # Uppercase + dedupe while preserving order.
+            return list(dict.fromkeys(str(s).strip().upper() for s in data if str(s).strip()))
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[watchlist] failed to load {WATCHLIST_FILE}: {e!r}", flush=True)
+    return list(DEFAULT_SYMBOLS)
+
+
+def save_shared_watchlist():
+    try:
+        with open(WATCHLIST_FILE, "w") as f:
+            json.dump(_shared_watchlist, f)
+    except Exception as e:
+        print(f"[watchlist] failed to save {WATCHLIST_FILE}: {e!r}", flush=True)
+
+
+_shared_watchlist = load_shared_watchlist()
+
 # One shared connection pool for every outbound call, instead of `requests`
 # implicitly building a fresh connection/SSL context on every single get().
 # On a memory-constrained instance (this app's free-tier host gives it only
@@ -71,9 +105,18 @@ _sma_cache = {}      # symbol -> {"data": {...}, "ts": float}
 
 # The full set of symbols anyone's watchlist currently includes. Grows as
 # people add tickers; the SMA background loop iterates over this each pass.
+# Nothing removes a symbol from a browser's list on the server directly
+# (watchlists are per-browser, stored client-side), so this tracks *when*
+# each symbol was last actually requested and drops stale ones out of the
+# background pass — otherwise a symbol tested once and later removed from
+# every browser's list would keep consuming rate-limit budget forever.
 _known_symbols = set(DEFAULT_SYMBOLS)
+# Seeded with the current time so defaults aren't wrongly treated as
+# "stale" by the TTL check before any real browser request ever arrives.
+_known_last_seen = {sym: time.time() for sym in DEFAULT_SYMBOLS}
 _known_lock = threading.Lock()
 _wake_event = threading.Event()  # lets a newly-added symbol skip the long wait
+KNOWN_SYMBOL_TTL = 2 * 60 * 60  # drop from background refresh after 2h of no requests
 
 
 def parse_symbols_param():
@@ -86,16 +129,32 @@ def register_known_symbols(symbols):
     """Adds newly-seen symbols to the shared watch set, kicks off an
     immediate one-off SMA/RSI fetch for each brand-new one (so it doesn't
     have to wait its turn in the next scheduled pass), and wakes the
-    background loop so the new symbol is included in future full passes."""
+    background loop so the new symbol is included in future full passes.
+    Also refreshes each symbol's last-seen time, which active_known_symbols()
+    uses to drop stale/orphaned symbols out of the background rotation."""
+    now = time.time()
     with _known_lock:
         new = set(symbols) - _known_symbols
         if new:
             _known_symbols.update(new)
+        for sym in symbols:
+            _known_last_seen[sym] = now
     if new:
         _wake_event.set()
         if TWELVE_DATA_API_KEY:
             for sym in new:
                 threading.Thread(target=fetch_sma_immediate, args=(sym,), daemon=True).start()
+
+
+def active_known_symbols():
+    """Symbols actually requested within the TTL window — used by the SMA
+    background pass so orphaned/abandoned symbols stop consuming budget."""
+    now = time.time()
+    with _known_lock:
+        return sorted(
+            s for s in _known_symbols
+            if now - _known_last_seen.get(s, 0) < KNOWN_SYMBOL_TTL
+        )
 
 app = Flask(__name__, static_folder=".")
 
@@ -137,6 +196,41 @@ def get_quote_cached(sym):
     if entry and (time.time() - entry["ts"]) < CACHE_SECONDS:
         return entry["data"]
     return None
+
+
+@app.route("/api/watchlist")
+def get_watchlist():
+    with _watchlist_lock:
+        symbols = list(_shared_watchlist)
+    register_known_symbols(symbols)
+    return jsonify({"symbols": symbols})
+
+
+@app.route("/api/watchlist/add", methods=["POST"])
+def add_to_watchlist():
+    body = request.get_json(silent=True) or {}
+    sym = str(body.get("symbol", "")).strip().upper()
+    if not sym:
+        return jsonify({"error": "symbol required"}), 400
+    with _watchlist_lock:
+        if sym not in _shared_watchlist:
+            _shared_watchlist.append(sym)
+            save_shared_watchlist()
+        symbols = list(_shared_watchlist)
+    register_known_symbols(symbols)
+    return jsonify({"symbols": symbols})
+
+
+@app.route("/api/watchlist/remove", methods=["POST"])
+def remove_from_watchlist():
+    body = request.get_json(silent=True) or {}
+    sym = str(body.get("symbol", "")).strip().upper()
+    with _watchlist_lock:
+        if sym in _shared_watchlist:
+            _shared_watchlist.remove(sym)
+            save_shared_watchlist()
+        symbols = list(_shared_watchlist)
+    return jsonify({"symbols": symbols})
 
 
 @app.route("/api/quotes")
@@ -380,8 +474,7 @@ def _sma_background_loop():
     print("[sma] background thread started", flush=True)
     while True:
         if TWELVE_DATA_API_KEY:
-            with _known_lock:
-                symbols = sorted(_known_symbols)
+            symbols = active_known_symbols()
             _sma_status["attempt_started"] = time.time()
             try:
                 fetch_sma_all(symbols)
@@ -474,8 +567,7 @@ def _afterhours_background_loop():
     while True:
         session = market_session_now()
         if session in ("pre", "post") and TWELVE_DATA_API_KEY:
-            with _known_lock:
-                symbols = sorted(_known_symbols)
+            symbols = active_known_symbols()
             print(f"[afterhours] market session is '{session}', refreshing {len(symbols)} symbols", flush=True)
             for i in range(0, len(symbols), TWELVE_DATA_BATCH_SIZE):
                 batch = symbols[i:i + TWELVE_DATA_BATCH_SIZE]
@@ -531,7 +623,8 @@ def afterhours_debug():
         "server_time_et": now_et,
         "timezone_error": tz_error,
         "twelve_data_key_set": bool(TWELVE_DATA_API_KEY),
-        "known_symbols": sorted(_known_symbols),
+        "known_symbols_all_time": sorted(_known_symbols),
+        "known_symbols_active": active_known_symbols(),
         "afterhours_cache_seconds_old": cache_ages,
     })
 

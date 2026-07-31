@@ -257,24 +257,17 @@
 
 <script>
 const DEFAULT_SYMBOLS = ["PLTR","NVDA","CLS","NBIS","HOOD","SPY","QQQ","GLW","CRDO","COHR","SOXL","DRAM","IREN"];
-const STORAGE_KEY = 'market_pulse_watchlist';
 
-function loadSymbols(){
+async function loadSharedWatchlist(){
   try{
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if(saved){
-      const parsed = JSON.parse(saved);
-      if(Array.isArray(parsed) && parsed.length) return parsed;
-    }
+    const res = await fetch('/api/watchlist');
+    const data = await res.json();
+    if(Array.isArray(data.symbols) && data.symbols.length) return data.symbols;
   }catch(e){ /* fall through to default */ }
   return [...DEFAULT_SYMBOLS];
 }
 
-function saveSymbols(){
-  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(SYMBOLS)); }catch(e){ /* storage unavailable, non-fatal */ }
-}
-
-let SYMBOLS = loadSymbols();
+let SYMBOLS = [...DEFAULT_SYMBOLS]; // placeholder until loadSharedWatchlist() resolves in init()
 const REFRESH_MS = 60 * 1000;
 const state = { history: {}, sma: null, afterhours: null, lastPrice: {}, lastPct: {}, secondsLeft: REFRESH_MS/1000 };
 
@@ -310,9 +303,18 @@ function buildCards(){
   });
 }
 
-function removeSymbol(sym){
-  SYMBOLS = SYMBOLS.filter(s => s !== sym);
-  saveSymbols();
+async function removeSymbol(sym){
+  let updated = SYMBOLS.filter(s => s !== sym);
+  try{
+    const res = await fetch('/api/watchlist/remove', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({symbol: sym}),
+    });
+    const data = await res.json();
+    if(Array.isArray(data.symbols)) updated = data.symbols;
+  }catch(e){ /* server unreachable — still reflect the removal locally */ }
+  SYMBOLS = updated;
   delete state.history[sym];
   delete state.lastPrice[sym];
   delete state.lastPct[sym];
@@ -321,14 +323,46 @@ function removeSymbol(sym){
   refreshSma();
 }
 
-function addSymbol(sym){
+async function addSymbol(sym){
   sym = sym.toUpperCase();
   if(SYMBOLS.includes(sym)) return;
-  SYMBOLS.push(sym);
-  saveSymbols();
+  let updated = [...SYMBOLS, sym];
+  try{
+    const res = await fetch('/api/watchlist/add', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({symbol: sym}),
+    });
+    const data = await res.json();
+    if(Array.isArray(data.symbols)) updated = data.symbols;
+  }catch(e){ /* server unreachable — still reflect the add locally */ }
+  SYMBOLS = updated;
   buildCards();
   refreshAll();
   refreshSma();
+}
+
+// Picks up tickers anyone else added or removed — called on the normal
+// refresh cycle so a friend's change shows up within about a minute,
+// without needing a manual page reload.
+async function syncWatchlist(){
+  try{
+    const res = await fetch('/api/watchlist');
+    const data = await res.json();
+    if(!Array.isArray(data.symbols)) return;
+    const changed = data.symbols.length !== SYMBOLS.length ||
+      data.symbols.some((s, i) => s !== SYMBOLS[i]);
+    if(!changed) return;
+    const removed = SYMBOLS.filter(s => !data.symbols.includes(s));
+    removed.forEach(sym => {
+      delete state.history[sym];
+      delete state.lastPrice[sym];
+      delete state.lastPct[sym];
+    });
+    SYMBOLS = data.symbols;
+    buildCards();
+    refreshSma();
+  }catch(e){ /* non-fatal — just try again next cycle */ }
 }
 
 function renderSpark(sym){
@@ -717,12 +751,13 @@ document.addEventListener('click', (e) => {
 });
 
 (async function init(){
+  SYMBOLS = await loadSharedWatchlist();
   buildCards();
   refreshAll();
   refreshSma();
   refreshMovers();
   refreshMacro();
-  setInterval(refreshAll, REFRESH_MS);
+  setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(refreshMovers, 10 * 60 * 1000);
   setInterval(refreshMacro, 15 * 60 * 1000);
