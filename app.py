@@ -1064,6 +1064,11 @@ GOLD_CACHE_SECONDS = 60 * 60  # hourly, per request
 GOLD_SYMBOLS = {"gold": "XAU", "silver": "XAG", "bitcoin": "BTC"}
 GOLD_LABELS = {"gold": "Gold $/oz", "silver": "Silver $/oz", "bitcoin": "Bitcoin"}
 _gold_cache = load_json_cache("gold_cache.json")
+# gold-api.com's free price endpoint gives no daily change data, so we track
+# our own rolling history and compute a 24h change from it — persisted to
+# disk so this doesn't have to rebuild from scratch on every redeploy.
+_gold_history = load_json_cache("gold_history.json")  # symbol -> [{"price":.., "ts":..}, ...]
+GOLD_HISTORY_MAX_AGE = 48 * 60 * 60  # prune anything older than this
 
 
 GOLD_API_HEADERS = {
@@ -1076,10 +1081,27 @@ GOLD_API_HEADERS = {
 _gold_status = {"last_attempt": None, "last_error": None}
 
 
+def compute_24h_change(key, current_price, now):
+    """Finds the history entry closest to 24h ago and returns percent
+    change from it to current_price. Returns None if we don't have
+    anything old enough yet (e.g. shortly after first deploy)."""
+    history = _gold_history.get(key, [])
+    target = now - 24 * 60 * 60
+    candidates = [h for h in history if h["ts"] <= target]
+    if not candidates:
+        return None
+    closest = max(candidates, key=lambda h: h["ts"])  # nearest to 24h ago, not older than needed
+    old_price = closest["price"]
+    if old_price == 0:
+        return None
+    return round((current_price - old_price) / old_price * 100, 2)
+
+
 def fetch_gold_all():
     _gold_status["last_attempt"] = time.time()
     print("[gold] requesting gold/silver/bitcoin", flush=True)
     out = {}
+    now = time.time()
     try:
         for key, symbol in GOLD_SYMBOLS.items():
             try:
@@ -1089,13 +1111,26 @@ def fetch_gold_all():
                 price = data.get("price")
                 if price is None:
                     raise ValueError("no price in response")
-                out[key] = {"ok": True, "value": round(float(price), 2), "updated_at": data.get("updatedAt")}
+                price = round(float(price), 2)
+
+                # Record this reading, then prune anything past the max age.
+                hist = _gold_history.setdefault(key, [])
+                hist.append({"price": price, "ts": now})
+                _gold_history[key] = [h for h in hist if now - h["ts"] <= GOLD_HISTORY_MAX_AGE]
+
+                out[key] = {
+                    "ok": True,
+                    "value": price,
+                    "updated_at": data.get("updatedAt"),
+                    "percent_change": compute_24h_change(key, price, now),
+                }
             except Exception as e:
                 print(f"[gold] {key} ({symbol}) failed: {e!r}", flush=True)
                 out[key] = {"ok": False, "error": str(e)}
         _gold_cache["data"] = out
-        _gold_cache["ts"] = time.time()
+        _gold_cache["ts"] = now
         save_json_cache("gold_cache.json", _gold_cache)
+        save_json_cache("gold_history.json", _gold_history)
         _gold_status["last_error"] = None
         print(f"[gold] updated: {out}", flush=True)
     except Exception as e:

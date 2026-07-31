@@ -106,6 +106,7 @@
   .earn-row{padding:4px 0;border-bottom:1px solid var(--border);}
   .earn-row:last-child{border-bottom:none;}
   .earn-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:11px;color:var(--muted);padding-bottom:4px;}
+  #earningsList{max-height:225px;overflow-y:auto;}
   .earn-stats .up{color:var(--green);}
   .earn-stats .down{color:var(--red);}
 
@@ -581,11 +582,12 @@ const INDEX_PROXIES = [
 function renderIndexStrip(market){
   const strip = document.getElementById('indexStripCore');
   if(!market){ return; }
+  const asOf = `as of ${new Date().toLocaleString()}`;
   strip.innerHTML = INDEX_PROXIES.map(({label, sym}) => {
     const m = market[sym];
     if(!m) return `<span class="idx"><span class="name">${label}</span> <span class="val">&mdash;</span></span>`;
     const up = m.pct >= 0;
-    return `<span class="idx">
+    return `<span class="idx" title="${asOf}">
       <span class="name">${label}</span>
       <span class="val">$${m.price.toFixed(2)}</span>
       <span class="chg ${up?'up':'down'}">${up?'+':''}${m.pct.toFixed(2)}%</span>
@@ -626,7 +628,17 @@ function renderMacroValue(elId, entry, formatter){
     el.title = (entry && entry.error) || '';
     return;
   }
-  el.title = entry.as_of ? `as of ${entry.as_of}` : '';
+  if(entry.as_of){
+    el.title = `as of ${entry.as_of}`;
+  }else if(entry.updated_at){
+    try{
+      el.title = `as of ${new Date(entry.updated_at).toLocaleString()}`;
+    }catch(e){
+      el.title = `as of ${entry.updated_at}`;
+    }
+  }else{
+    el.title = '';
+  }
   if(entry.percent_change == null){
     el.textContent = formatter(entry.value);
     return;
@@ -700,7 +712,7 @@ async function refreshEarnings(){
       .filter(({info}) => info && info.ok && info.kind && info.date)
       .map(({sym, info}) => ({ sym, info, date: new Date(info.date + 'T00:00:00') }))
       .filter(({date}) => date >= lookback && date <= cutoff)
-      .sort((a, b) => Math.abs(a.date - today) - Math.abs(b.date - today));
+      .sort((a, b) => a.date - b.date);  // chronological — oldest (most past) first, future dates last
 
     if(!entries.length){
       el.innerHTML = `<div class="movers-empty">No recent or upcoming earnings in your watchlist</div>`;
