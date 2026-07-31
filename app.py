@@ -990,6 +990,16 @@ def earnings():
     return jsonify(out)
 
 
+@app.route("/api/debug/earnings")
+def earnings_debug():
+    ages = {sym: round(time.time() - e["ts"], 1) for sym, e in _earnings_cache.items()}
+    return jsonify({
+        "finnhub_key_set": bool(API_KEY),
+        "known_symbols_active": active_known_symbols(),
+        "cache_seconds_old": ages,
+    })
+
+
 def _earnings_background_loop():
     print("[earnings] background thread started", flush=True)
     while True:
