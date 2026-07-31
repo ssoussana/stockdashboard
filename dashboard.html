@@ -84,6 +84,8 @@
   .index-strip .idx .val{color:var(--text);font-weight:600;}
   .index-strip .idx .chg.up{color:var(--green);}
   .index-strip .idx .chg.down{color:var(--red);}
+  #indexStrip{padding-bottom:6px;margin-bottom:6px;}
+  #indexStrip2{padding-top:0;margin-top:0;margin-bottom:22px;}
 
   /* Market movers */
   .movers-panel{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:22px;}
@@ -230,6 +232,9 @@
     </span>
     <span class="idx" title="WTI crude oil, real $/barrel — FRED (St. Louis Fed), updates once per business day"><span class="name">CRUDE OIL</span> <span class="val" id="macroOilVal">&mdash;</span></span>
     <span class="idx" title="10-Year Treasury Constant Maturity Rate, real yield — FRED (St. Louis Fed), updates once per business day"><span class="name">10Y TREASURY</span> <span class="val" id="macroTreasuryVal">&mdash;</span></span>
+  </div>
+
+  <div class="index-strip" id="indexStrip2">
     <span class="idx" title="Gold spot price per troy ounce — updates hourly"><span class="name">GOLD</span> <span class="val" id="goldVal">&mdash;</span></span>
     <span class="idx" title="Silver spot price per troy ounce — updates hourly"><span class="name">SILVER</span> <span class="val" id="silverVal">&mdash;</span></span>
     <span class="idx" title="Bitcoin price — updates hourly"><span class="name">BITCOIN</span> <span class="val" id="bitcoinVal">&mdash;</span></span>
