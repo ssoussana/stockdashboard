@@ -106,6 +106,11 @@
   .movers-row .pct{font-weight:600;}
   .movers-row .pct.up{color:var(--green);}
   .movers-row .pct.down{color:var(--red);}
+  .earn-row{padding:4px 0;border-bottom:1px solid var(--border);}
+  .earn-row:last-child{border-bottom:none;}
+  .earn-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:11px;color:var(--muted);padding-bottom:4px;}
+  .earn-stats .up{color:var(--green);}
+  .earn-stats .down{color:var(--red);}
 
   /* Stock grid */
   .grid-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:16px;flex-wrap:wrap;}
@@ -240,6 +245,13 @@
     </div>
   </section>
 
+  <section class="movers-panel" style="grid-template-columns:1fr;">
+    <div class="movers-col">
+      <h2>Earnings (Watchlist)</h2>
+      <div class="movers-list" id="earningsList"><div class="movers-empty">Loading&hellip;</div></div>
+    </div>
+  </section>
+
   <div class="grid-head">
     <h2>Watchlist</h2>
     <div class="add-box">
@@ -321,6 +333,7 @@ async function removeSymbol(sym){
   buildCards();
   refreshAll();
   refreshSma();
+  refreshEarnings();
 }
 
 async function addSymbol(sym){
@@ -340,6 +353,7 @@ async function addSymbol(sym){
   buildCards();
   refreshAll();
   refreshSma();
+  refreshEarnings();
 }
 
 // Picks up tickers anyone else added or removed — called on the normal
@@ -362,6 +376,7 @@ async function syncWatchlist(){
     SYMBOLS = data.symbols;
     buildCards();
     refreshSma();
+    refreshEarnings();
   }catch(e){ /* non-fatal — just try again next cycle */ }
 }
 
@@ -655,7 +670,86 @@ async function refreshMovers(){
   }
 }
 
-document.getElementById('refreshBtn').addEventListener('click', refreshAll);
+// ---------- Upcoming earnings ----------
+function fmtRevenue(v){
+  if(v == null) return null;
+  const abs = Math.abs(v);
+  if(abs >= 1e9) return '$'+(v/1e9).toFixed(1)+'B';
+  if(abs >= 1e6) return '$'+(v/1e6).toFixed(1)+'M';
+  return '$'+Number(v).toLocaleString();
+}
+
+async function refreshEarnings(){
+  const el = document.getElementById('earningsList');
+  try{
+    const res = await fetch(`/api/earnings?symbols=${SYMBOLS.join(',')}`);
+    const data = await res.json();
+    const today = new Date(); today.setHours(0,0,0,0);
+    const cutoff = new Date(today); cutoff.setDate(cutoff.getDate() + 60);
+    const lookback = new Date(today); lookback.setDate(lookback.getDate() - 14);
+
+    const entries = SYMBOLS
+      .map(sym => ({ sym, info: data[sym] }))
+      .filter(({info}) => info && info.ok && info.kind && info.date)
+      .map(({sym, info}) => ({ sym, info, date: new Date(info.date + 'T00:00:00') }))
+      .filter(({date}) => date >= lookback && date <= cutoff)
+      .sort((a, b) => Math.abs(a.date - today) - Math.abs(b.date - today));
+
+    if(!entries.length){
+      el.innerHTML = `<div class="movers-empty">No recent or upcoming earnings in your watchlist</div>`;
+      return;
+    }
+
+    const hourLabel = { bmo: 'before open', amc: 'after close', dmh: 'during hours' };
+    el.innerHTML = entries.map(({sym, info, date}) => {
+      const dateStr = date.toLocaleDateString(undefined, {month:'short', day:'numeric'});
+
+      if(info.kind === 'recent'){
+        const epsDiff = (info.eps_actual!=null && info.eps_estimate!=null) ? info.eps_actual - info.eps_estimate : null;
+        const epsCls = epsDiff == null ? '' : (epsDiff > 0 ? 'up' : (epsDiff < 0 ? 'down' : ''));
+        const epsChip = info.eps_actual!=null
+          ? `<span class="stat ${epsCls}">EPS $${info.eps_actual.toFixed(2)}${info.eps_estimate!=null ? ' vs $'+info.eps_estimate.toFixed(2)+' est' : ''}</span>`
+          : '';
+
+        const revDiff = (info.revenue_actual!=null && info.revenue_estimate!=null) ? info.revenue_actual - info.revenue_estimate : null;
+        const revCls = revDiff == null ? '' : (revDiff > 0 ? 'up' : (revDiff < 0 ? 'down' : ''));
+        const revChip = info.revenue_actual!=null
+          ? `<span class="stat ${revCls}">Rev ${fmtRevenue(info.revenue_actual)}${info.revenue_estimate!=null ? ' vs '+fmtRevenue(info.revenue_estimate)+' est' : ''}</span>`
+          : '';
+
+        return `<div class="earn-row">
+          <div class="movers-row" style="border-bottom:none;padding-bottom:2px;">
+            <span><span class="sym">${sym}</span><span class="name">Reported ${dateStr}</span></span>
+          </div>
+          <div class="earn-stats">${epsChip}${revChip}</div>
+        </div>`;
+      }
+
+      const daysAway = Math.round((date - today) / 86400000);
+      const when = daysAway === 0 ? 'today' : daysAway === 1 ? 'tomorrow' : `in ${daysAway}d`;
+      return `<div class="movers-row">
+        <span><span class="sym">${sym}</span><span class="name">${dateStr}${info.hour && hourLabel[info.hour] ? ' · '+hourLabel[info.hour] : ''}</span></span>
+        <span class="pct">${when}</span>
+      </div>`;
+    }).join('');
+  }catch(e){
+    el.innerHTML = `<div class="movers-empty">unavailable</div>`;
+  }
+}
+
+document.getElementById('refreshBtn').addEventListener('click', async () => {
+  refreshAll();
+  try{
+    const res = await fetch('/api/afterhours/refresh', { method: 'POST' });
+    const data = await res.json();
+    if(data.triggered){
+      // Give the server a moment to actually complete the fetch, then
+      // pull the fresh result in (rather than waiting for the next
+      // regular 60s poll).
+      setTimeout(refreshAfterhours, 3000);
+    }
+  }catch(e){ /* non-fatal — the regular poll cycle will still catch up eventually */ }
+});
 
 function tickCountdown(){
   state.secondsLeft = Math.max(0, state.secondsLeft - 1);
@@ -757,10 +851,12 @@ document.addEventListener('click', (e) => {
   refreshSma();
   refreshMovers();
   refreshMacro();
+  refreshEarnings();
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(refreshMovers, 10 * 60 * 1000);
   setInterval(refreshMacro, 15 * 60 * 1000);
+  setInterval(refreshEarnings, 60 * 60 * 1000);
   setInterval(tickCountdown, 1000);
 })();
 </script>

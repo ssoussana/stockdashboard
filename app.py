@@ -28,7 +28,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request, send_from_directory
@@ -163,11 +163,12 @@ def parse_symbols_param():
 
 def register_known_symbols(symbols):
     """Adds newly-seen symbols to the shared watch set, kicks off an
-    immediate one-off SMA/RSI fetch for each brand-new one (so it doesn't
-    have to wait its turn in the next scheduled pass), and wakes the
-    background loop so the new symbol is included in future full passes.
-    Also refreshes each symbol's last-seen time, which active_known_symbols()
-    uses to drop stale/orphaned symbols out of the background rotation."""
+    immediate one-off SMA/RSI and earnings fetch for each brand-new one
+    (so neither has to wait its turn in the next scheduled pass), and
+    wakes the SMA background loop so the new symbol is included in future
+    full passes. Also refreshes each symbol's last-seen time, which
+    active_known_symbols() uses to drop stale/orphaned symbols out of the
+    background rotation."""
     now = time.time()
     with _known_lock:
         new = set(symbols) - _known_symbols
@@ -177,6 +178,8 @@ def register_known_symbols(symbols):
             _known_last_seen[sym] = now
     if new:
         _wake_event.set()
+        for sym in new:
+            threading.Thread(target=fetch_earnings_immediate, args=(sym,), daemon=True).start()
         if TWELVE_DATA_API_KEY:
             for sym in new:
                 threading.Thread(target=fetch_sma_immediate, args=(sym,), daemon=True).start()
@@ -628,6 +631,11 @@ def fetch_afterhours_batch(symbols):
     return out
 
 
+_afterhours_wake_event = threading.Event()
+_afterhours_last_forced = 0
+AFTERHOURS_FORCE_COOLDOWN = 30  # seconds — stops rapid button-mashing from burning through rate-limit budget
+
+
 def _afterhours_background_loop():
     print("[afterhours] background thread started", flush=True)
     while True:
@@ -648,7 +656,8 @@ def _afterhours_background_loop():
             print("[afterhours] pass complete", flush=True)
         else:
             print(f"[afterhours] market session is '{session}', skipping", flush=True)
-        time.sleep(AFTERHOURS_CACHE_SECONDS)
+        _afterhours_wake_event.clear()
+        _afterhours_wake_event.wait(timeout=AFTERHOURS_CACHE_SECONDS)
 
 
 threading.Thread(target=_afterhours_background_loop, daemon=True).start()
@@ -667,6 +676,25 @@ def afterhours():
         entry = _afterhours_cache.get(sym)
         out[sym] = entry["data"] if entry else {"ok": True, "active": False}
     return jsonify(out)
+
+
+@app.route("/api/afterhours/refresh", methods=["POST"])
+def afterhours_force_refresh():
+    """Wakes the after-hours background loop immediately instead of waiting
+    out its normal 15-minute cycle. Cooldown-guarded so a user mashing the
+    refresh button can't repeatedly burn through the shared rate-limit
+    budget — extra clicks within the cooldown window are silently no-ops."""
+    global _afterhours_last_forced
+    now = time.time()
+    session = market_session_now()
+    if session not in ("pre", "post"):
+        return jsonify({"triggered": False, "reason": f"market session is '{session}', nothing to refresh"})
+    if now - _afterhours_last_forced < AFTERHOURS_FORCE_COOLDOWN:
+        wait = round(AFTERHOURS_FORCE_COOLDOWN - (now - _afterhours_last_forced), 1)
+        return jsonify({"triggered": False, "reason": f"cooldown active, try again in {wait}s"})
+    _afterhours_last_forced = now
+    _afterhours_wake_event.set()
+    return jsonify({"triggered": True})
 
 
 @app.route("/api/debug/afterhours")
@@ -869,6 +897,110 @@ def _macro_background_loop():
 
 
 threading.Thread(target=_macro_background_loop, daemon=True).start()
+
+
+# ---------- Earnings calendar ----------
+EARNINGS_CACHE_SECONDS = 24 * 60 * 60  # earnings dates rarely change intraday
+EARNINGS_CACHE_FILE = "earnings_cache.json"
+_earnings_cache = load_json_cache(EARNINGS_CACHE_FILE)  # symbol -> {"data": {...}, "ts": float}
+_earnings_executor = ThreadPoolExecutor(max_workers=4)
+
+
+def fetch_earnings_one(sym):
+    """Earnings info for one symbol, via Finnhub's earnings calendar
+    (already using this key elsewhere — no new signup needed). Prefers a
+    result reported within the last 14 days (real numbers, beat/miss vs
+    estimates) over a future scheduled date, since a just-reported quarter
+    is more useful to see than "next earnings in 3 months"."""
+    today = datetime.now().date()
+    try:
+        r = _http.get(
+            "https://finnhub.io/api/v1/calendar/earnings",
+            params={
+                "symbol": sym,
+                "from": (today - timedelta(days=14)).isoformat(),
+                "to": (today + timedelta(days=180)).isoformat(),
+                "token": API_KEY,
+            },
+            timeout=6,
+        )
+        r.raise_for_status()
+        events = r.json().get("earningsCalendar", [])
+        if not events:
+            return {"ok": True, "kind": None}
+
+        # A "recent" report: date in the past 14 days AND actually has
+        # reported numbers (epsActual present) — a date alone doesn't
+        # guarantee the report has landed yet.
+        recent = [
+            e for e in events
+            if e.get("date") and e.get("epsActual") is not None
+            and (today - timedelta(days=14)).isoformat() <= e["date"] <= today.isoformat()
+        ]
+        if recent:
+            e = sorted(recent, key=lambda e: e["date"])[-1]  # most recent
+            return {
+                "ok": True, "kind": "recent", "date": e.get("date"),
+                "eps_actual": e.get("epsActual"), "eps_estimate": e.get("epsEstimate"),
+                "revenue_actual": e.get("revenueActual"), "revenue_estimate": e.get("revenueEstimate"),
+            }
+
+        upcoming = [e for e in events if e.get("date") and e["date"] >= today.isoformat()]
+        if upcoming:
+            e = sorted(upcoming, key=lambda e: e["date"])[0]  # soonest
+            return {
+                "ok": True, "kind": "upcoming", "date": e.get("date"),
+                "hour": e.get("hour"), "eps_estimate": e.get("epsEstimate"),
+            }
+
+        return {"ok": True, "kind": None}
+    except requests.exceptions.HTTPError:
+        return {"ok": False, "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def fetch_earnings_immediate(sym):
+    """One-off fetch for a brand-new symbol, so it doesn't wait for the
+    next scheduled daily pass."""
+    print(f"[earnings] immediate fetch for new symbol {sym}", flush=True)
+    data = fetch_earnings_one(sym)
+    _earnings_cache[sym] = {"data": data, "ts": time.time()}
+    save_json_cache(EARNINGS_CACHE_FILE, _earnings_cache)
+
+
+def fetch_earnings_all(symbols):
+    print(f"[earnings] requesting {len(symbols)} symbols", flush=True)
+    results = list(_earnings_executor.map(fetch_earnings_one, symbols))
+    now = time.time()
+    for sym, data in zip(symbols, results):
+        _earnings_cache[sym] = {"data": data, "ts": now}
+    save_json_cache(EARNINGS_CACHE_FILE, _earnings_cache)
+    print("[earnings] pass complete", flush=True)
+
+
+@app.route("/api/earnings")
+def earnings():
+    symbols = parse_symbols_param()
+    register_known_symbols(symbols)
+    out = {}
+    for sym in symbols:
+        entry = _earnings_cache.get(sym)
+        out[sym] = entry["data"] if entry else {"ok": False, "error": "not fetched yet"}
+    return jsonify(out)
+
+
+def _earnings_background_loop():
+    print("[earnings] background thread started", flush=True)
+    while True:
+        try:
+            fetch_earnings_all(active_known_symbols())
+        except Exception as e:
+            print(f"[earnings] fetch_earnings_all raised: {e!r}", flush=True)
+        time.sleep(EARNINGS_CACHE_SECONDS)
+
+
+threading.Thread(target=_earnings_background_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
