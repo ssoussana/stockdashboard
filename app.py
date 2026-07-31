@@ -1058,6 +1058,72 @@ def _earnings_background_loop():
 threading.Thread(target=_earnings_background_loop, daemon=True).start()
 
 
+# ---------- Gold / Silver / Bitcoin ----------
+GOLD_API_BASE = "https://api.gold-api.com"
+GOLD_CACHE_SECONDS = 60 * 60  # hourly, per request
+GOLD_SYMBOLS = {"gold": "XAU", "silver": "XAG", "bitcoin": "BTC"}
+GOLD_LABELS = {"gold": "Gold $/oz", "silver": "Silver $/oz", "bitcoin": "Bitcoin"}
+_gold_cache = load_json_cache("gold_cache.json")
+
+
+GOLD_API_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0.0.0 Safari/537.36")
+}
+
+
+def fetch_gold_all():
+    print("[gold] requesting gold/silver/bitcoin", flush=True)
+    out = {}
+    for key, symbol in GOLD_SYMBOLS.items():
+        try:
+            r = _http.get(f"{GOLD_API_BASE}/price/{symbol}", headers=GOLD_API_HEADERS, timeout=(5, 15))
+            r.raise_for_status()
+            data = r.json()
+            price = data.get("price")
+            if price is None:
+                raise ValueError("no price in response")
+            out[key] = {"ok": True, "value": round(float(price), 2), "updated_at": data.get("updatedAt")}
+        except Exception as e:
+            print(f"[gold] {key} ({symbol}) failed: {e!r}", flush=True)
+            out[key] = {"ok": False, "error": str(e)}
+    _gold_cache["data"] = out
+    _gold_cache["ts"] = time.time()
+    save_json_cache("gold_cache.json", _gold_cache)
+    print(f"[gold] updated: {out}", flush=True)
+
+
+@app.route("/api/gold")
+def gold():
+    if _gold_cache.get("data") is None:
+        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in GOLD_SYMBOLS})
+    return jsonify(_gold_cache["data"])
+
+
+@app.route("/api/debug/gold")
+def gold_debug():
+    return jsonify({
+        "symbols": GOLD_SYMBOLS,
+        "labels": GOLD_LABELS,
+        "cache_seconds_old": round(time.time() - _gold_cache["ts"], 1) if _gold_cache.get("data") else None,
+        "cached_data": _gold_cache.get("data"),
+    })
+
+
+def _gold_background_loop():
+    print("[gold] background thread started", flush=True)
+    while True:
+        try:
+            fetch_gold_all()
+        except Exception as e:
+            print(f"[gold] fetch_gold_all raised: {e!r}", flush=True)
+        time.sleep(GOLD_CACHE_SECONDS)
+
+
+threading.Thread(target=_gold_background_loop, daemon=True).start()
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"Default watchlist: {', '.join(DEFAULT_SYMBOLS)}")

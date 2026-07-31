@@ -230,6 +230,9 @@
     </span>
     <span class="idx" title="WTI crude oil, real $/barrel — FRED (St. Louis Fed), updates once per business day"><span class="name">CRUDE OIL</span> <span class="val" id="macroOilVal">&mdash;</span></span>
     <span class="idx" title="10-Year Treasury Constant Maturity Rate, real yield — FRED (St. Louis Fed), updates once per business day"><span class="name">10Y TREASURY</span> <span class="val" id="macroTreasuryVal">&mdash;</span></span>
+    <span class="idx" title="Gold spot price per troy ounce — updates hourly"><span class="name">GOLD</span> <span class="val" id="goldVal">&mdash;</span></span>
+    <span class="idx" title="Silver spot price per troy ounce — updates hourly"><span class="name">SILVER</span> <span class="val" id="silverVal">&mdash;</span></span>
+    <span class="idx" title="Bitcoin price — updates hourly"><span class="name">BITCOIN</span> <span class="val" id="bitcoinVal">&mdash;</span></span>
   </div>
 
   <section class="movers-panel">
@@ -597,6 +600,20 @@ async function refreshMacro(){
   }
 }
 
+async function refreshGold(){
+  try{
+    const res = await fetch('/api/gold');
+    const data = await res.json();
+    renderMacroValue('goldVal', data.gold, v => `$${v.toFixed(2)}`);
+    renderMacroValue('silverVal', data.silver, v => `$${v.toFixed(2)}`);
+    renderMacroValue('bitcoinVal', data.bitcoin, v => `$${v.toLocaleString(undefined, {maximumFractionDigits:0})}`);
+  }catch(e){
+    document.getElementById('goldVal').textContent = '\u2014';
+    document.getElementById('silverVal').textContent = '\u2014';
+    document.getElementById('bitcoinVal').textContent = '\u2014';
+  }
+}
+
 function renderMacroValue(elId, entry, formatter){
   const el = document.getElementById(elId);
   if(!entry || !entry.ok || entry.value == null){
@@ -837,11 +854,13 @@ document.addEventListener('click', (e) => {
   refreshMovers();
   refreshMacro();
   refreshEarnings();
+  refreshGold();
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(refreshMovers, 10 * 60 * 1000);
   setInterval(refreshMacro, 15 * 60 * 1000);
   setInterval(refreshEarnings, 60 * 60 * 1000);
+  setInterval(refreshGold, 60 * 60 * 1000);
   setInterval(tickCountdown, 1000);
 })();
 </script>
