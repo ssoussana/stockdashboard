@@ -86,6 +86,23 @@
   .index-strip .idx .chg.up{color:var(--green);}
   .index-strip .idx .chg.down{color:var(--red);}
 
+  /* Market movers */
+  .movers-panel{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:22px;}
+  @media (max-width:640px){.movers-panel{grid-template-columns:1fr;}}
+  .movers-col{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;}
+  .movers-col h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;font-family:var(--mono);font-weight:600;}
+  .movers-empty{font-family:var(--mono);font-size:12px;color:var(--muted-dim);padding:6px 0;}
+  .movers-row{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:7px 0;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:12.5px;
+  }
+  .movers-row:last-child{border-bottom:none;}
+  .movers-row .sym{font-weight:700;color:var(--text);}
+  .movers-row .name{color:var(--muted-dim);font-size:11px;margin-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px;display:inline-block;vertical-align:bottom;}
+  .movers-row .pct{font-weight:600;}
+  .movers-row .pct.up{color:var(--green);}
+  .movers-row .pct.down{color:var(--red);}
+
   /* Stock grid */
   .grid-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:16px;flex-wrap:wrap;}
   .grid-head h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0;font-family:var(--mono);font-weight:600;}
@@ -203,6 +220,17 @@
     <span class="idx"><span class="name">NASDAQ</span> <span class="val">&mdash;</span></span>
     <span class="idx"><span class="name">S&amp;P 500</span> <span class="val">&mdash;</span></span>
   </div>
+
+  <section class="movers-panel">
+    <div class="movers-col">
+      <h2>Top Gainers</h2>
+      <div class="movers-list" id="gainersList"><div class="movers-empty">Loading&hellip;</div></div>
+    </div>
+    <div class="movers-col">
+      <h2>Top Losers</h2>
+      <div class="movers-list" id="losersList"><div class="movers-empty">Loading&hellip;</div></div>
+    </div>
+  </section>
 
   <div class="grid-head">
     <h2>Watchlist</h2>
@@ -523,6 +551,40 @@ async function refreshAll(){
   state.secondsLeft = REFRESH_MS/1000;
 }
 
+// ---------- Market movers ----------
+function renderMoversList(containerId, items, error){
+  const el = document.getElementById(containerId);
+  if(error){
+    el.innerHTML = `<div class="movers-empty">${error}</div>`;
+    return;
+  }
+  if(!items || !items.length){
+    el.innerHTML = `<div class="movers-empty">No data</div>`;
+    return;
+  }
+  el.innerHTML = items.map(m => {
+    const pct = m.changesPercentage;
+    const up = pct >= 0;
+    const pctStr = pct != null ? `${up?'+':''}${pct.toFixed(2)}%` : '&mdash;';
+    return `<div class="movers-row">
+      <span><span class="sym">${m.symbol}</span><span class="name">${m.name || ''}</span></span>
+      <span class="pct ${up?'up':'down'}">${pctStr}</span>
+    </div>`;
+  }).join('');
+}
+
+async function refreshMovers(){
+  try{
+    const res = await fetch('/api/movers');
+    const data = await res.json();
+    renderMoversList('gainersList', data.gainers, data.error);
+    renderMoversList('losersList', data.losers, data.error);
+  }catch(e){
+    renderMoversList('gainersList', null, 'unavailable');
+    renderMoversList('losersList', null, 'unavailable');
+  }
+}
+
 document.getElementById('refreshBtn').addEventListener('click', refreshAll);
 
 function tickCountdown(){
@@ -622,8 +684,10 @@ document.addEventListener('click', (e) => {
   buildCards();
   refreshAll();
   refreshSma();
+  refreshMovers();
   setInterval(refreshAll, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
+  setInterval(refreshMovers, 10 * 60 * 1000);
   setInterval(tickCountdown, 1000);
 })();
 </script>

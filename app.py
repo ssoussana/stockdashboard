@@ -8,8 +8,12 @@ it's read from an environment variable and never sent to the browser.
 Setup:
     pip install flask requests
     export FINNHUB_API_KEY="your-key-here"
-    export TWELVE_DATA_API_KEY="your-key-here"   (optional, powers the SMA line —
-        free at twelvedata.com, no card required. Without it, SMA just shows "n/a".)
+    export TWELVE_DATA_API_KEY="your-key-here"   (optional, powers the SMA/RSI line and
+        after-hours prices — free at twelvedata.com, no card required. Without it,
+        those sections just show "n/a".)
+    export FMP_API_KEY="your-key-here"           (optional, powers the market-movers
+        list — free at financialmodelingprep.com, no card required. Without it, that
+        section is just empty.)
     python app.py
 
 Then open http://localhost:5000
@@ -38,8 +42,19 @@ if not API_KEY:
 # reports every symbol as unavailable instead of crashing the whole app.
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
+# Optional — only needed for the market-movers (gainers/losers) list.
+FMP_API_KEY = os.environ.get("FMP_API_KEY")
+
 DEFAULT_SYMBOLS = ["PLTR", "NVDA", "CLS", "NBIS", "HOOD", "SPY", "QQQ",
                     "GLW", "CRDO", "COHR", "SOXL", "DRAM", "IREN"]
+
+# One shared connection pool for every outbound call, instead of `requests`
+# implicitly building a fresh connection/SSL context on every single get().
+# On a memory-constrained instance (this app's free-tier host gives it only
+# 512MB), that per-call overhead was likely a real contributor to the OOM
+# kills we've been seeing — those wipe every in-memory cache when they
+# happen, which explains a lot of the "why did this reset" confusion.
+_http = requests.Session()
 
 CACHE_SECONDS = 60  # per-symbol, shared across all visitors requesting that symbol
 _quote_cache = {}   # symbol -> {"data": {...}, "ts": float}
@@ -86,7 +101,7 @@ def index():
 
 def fetch_quote_one(sym):
     try:
-        r = requests.get(
+        r = _http.get(
             "https://finnhub.io/api/v1/quote",
             params={"symbol": sym, "token": API_KEY},
             timeout=6,
@@ -104,7 +119,11 @@ def fetch_quote_one(sym):
         return {"ok": False, "error": "fetch failed"}
 
 
-_quote_executor = ThreadPoolExecutor(max_workers=8)
+_quote_executor = ThreadPoolExecutor(max_workers=4)  # reduced from 8 — fewer
+                                                       # simultaneous open
+                                                       # connections, still
+                                                       # fast for typical
+                                                       # watchlist sizes
 
 
 def get_quote_cached(sym):
@@ -150,7 +169,7 @@ def search():
     if not q:
         return jsonify([])
     try:
-        r = requests.get(
+        r = _http.get(
             "https://finnhub.io/api/v1/search",
             params={"q": q, "token": API_KEY},
             timeout=6,
@@ -222,7 +241,7 @@ def fetch_sma_batch(symbols):
     acquire_twelvedata_credits(len(symbols))
     print(f"[sma] requesting batch: {symbols}", flush=True)
     t0 = time.time()
-    r = requests.get(
+    r = _http.get(
         "https://api.twelvedata.com/time_series",
         params={
             "symbol": ",".join(symbols),
@@ -393,7 +412,7 @@ def fetch_afterhours_batch(symbols):
     alongside the regular session's numbers."""
     acquire_twelvedata_credits(len(symbols))
     print(f"[afterhours] requesting batch: {symbols}", flush=True)
-    r = requests.get(
+    r = _http.get(
         "https://api.twelvedata.com/quote",
         params={
             "symbol": ",".join(symbols),
@@ -415,17 +434,15 @@ def fetch_afterhours_batch(symbols):
                 raise ValueError("symbol missing from batch response")
             if entry.get("status") == "error":
                 raise ValueError(entry.get("message", "twelve data error"))
-            is_ext = str(entry.get("is_extended_hours", "")).lower() == "true"
-            if not is_ext:
+            # The "is_extended_hours" flag documented by Twelve Data doesn't
+            # reliably appear in real responses — confirmed by inspecting a
+            # live response that had real extended_price/extended_change
+            # data but no is_extended_hours field at all. The presence of
+            # extended_price itself is the reliable signal instead.
+            price = entry.get("extended_price")
+            if price is None:
                 out[sym] = {"ok": True, "active": False}
                 continue
-            # Field name isn't fully confirmed from documentation alone —
-            # fall back to "close" (which Twelve Data's own example shows
-            # holding the extended print when is_extended_hours is true)
-            # if a dedicated "extended_price" field isn't present.
-            price = entry.get("extended_price", entry.get("close"))
-            if price is None:
-                raise ValueError("no extended price in response")
             out[sym] = {"ok": True, "active": True, "price": round(float(price), 2)}
         except Exception as e:
             out[sym] = {"ok": False, "error": str(e)}
@@ -497,6 +514,67 @@ def afterhours_debug():
         "known_symbols": sorted(_known_symbols),
         "afterhours_cache_seconds_old": cache_ages,
     })
+
+
+# ---------- Market movers (top gainers/losers, whole-market — not tied to
+# the watchlist) ----------
+MOVERS_CACHE_SECONDS = 10 * 60  # FMP free tier: 250 requests/day — keep this gentle
+_movers_cache = {"data": None, "ts": 0}
+
+
+def fetch_movers_list(endpoint):
+    r = _http.get(
+        f"https://financialmodelingprep.com/stable/{endpoint}",
+        params={"apikey": FMP_API_KEY},
+        timeout=(5, 15),
+    )
+    r.raise_for_status()
+    data = r.json()
+    if not isinstance(data, list):
+        raise ValueError(f"unexpected response shape: {str(data)[:120]}")
+    return [
+        {
+            "symbol": item.get("symbol"),
+            "name": item.get("name"),
+            "price": item.get("price"),
+            "change": item.get("change"),
+            "changesPercentage": item.get("changesPercentage"),
+        }
+        for item in data[:5]
+        if item.get("symbol")
+    ]
+
+
+def fetch_movers_all():
+    print("[movers] requesting biggest-gainers and biggest-losers", flush=True)
+    gainers = fetch_movers_list("biggest-gainers")
+    losers = fetch_movers_list("biggest-losers")
+    _movers_cache["data"] = {"gainers": gainers, "losers": losers}
+    _movers_cache["ts"] = time.time()
+    print(f"[movers] updated: {len(gainers)} gainers, {len(losers)} losers", flush=True)
+
+
+@app.route("/api/movers")
+def movers():
+    if not FMP_API_KEY:
+        return jsonify({"error": "FMP_API_KEY not set", "gainers": [], "losers": []})
+    if _movers_cache["data"] is None:
+        return jsonify({"error": "not fetched yet", "gainers": [], "losers": []})
+    return jsonify(_movers_cache["data"])
+
+
+def _movers_background_loop():
+    print("[movers] background thread started", flush=True)
+    while True:
+        if FMP_API_KEY:
+            try:
+                fetch_movers_all()
+            except Exception as e:
+                print(f"[movers] fetch_movers_all raised: {e!r}", flush=True)
+        time.sleep(MOVERS_CACHE_SECONDS)
+
+
+threading.Thread(target=_movers_background_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
