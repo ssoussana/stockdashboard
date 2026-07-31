@@ -1073,25 +1073,38 @@ GOLD_API_HEADERS = {
 }
 
 
+_gold_status = {"last_attempt": None, "last_error": None}
+
+
 def fetch_gold_all():
+    _gold_status["last_attempt"] = time.time()
     print("[gold] requesting gold/silver/bitcoin", flush=True)
     out = {}
-    for key, symbol in GOLD_SYMBOLS.items():
-        try:
-            r = _http.get(f"{GOLD_API_BASE}/price/{symbol}", headers=GOLD_API_HEADERS, timeout=(5, 15))
-            r.raise_for_status()
-            data = r.json()
-            price = data.get("price")
-            if price is None:
-                raise ValueError("no price in response")
-            out[key] = {"ok": True, "value": round(float(price), 2), "updated_at": data.get("updatedAt")}
-        except Exception as e:
-            print(f"[gold] {key} ({symbol}) failed: {e!r}", flush=True)
-            out[key] = {"ok": False, "error": str(e)}
-    _gold_cache["data"] = out
-    _gold_cache["ts"] = time.time()
-    save_json_cache("gold_cache.json", _gold_cache)
-    print(f"[gold] updated: {out}", flush=True)
+    try:
+        for key, symbol in GOLD_SYMBOLS.items():
+            try:
+                r = _http.get(f"{GOLD_API_BASE}/price/{symbol}", headers=GOLD_API_HEADERS, timeout=(5, 15))
+                r.raise_for_status()
+                data = r.json()
+                price = data.get("price")
+                if price is None:
+                    raise ValueError("no price in response")
+                out[key] = {"ok": True, "value": round(float(price), 2), "updated_at": data.get("updatedAt")}
+            except Exception as e:
+                print(f"[gold] {key} ({symbol}) failed: {e!r}", flush=True)
+                out[key] = {"ok": False, "error": str(e)}
+        _gold_cache["data"] = out
+        _gold_cache["ts"] = time.time()
+        save_json_cache("gold_cache.json", _gold_cache)
+        _gold_status["last_error"] = None
+        print(f"[gold] updated: {out}", flush=True)
+    except Exception as e:
+        # Catches anything OUTSIDE the per-symbol loop — e.g. save_json_cache
+        # or something unexpected — so a whole-batch failure is visible too,
+        # not just per-symbol ones.
+        _gold_status["last_error"] = f"whole-batch failure: {e!r}"
+        print(f"[gold] fetch_gold_all whole-batch failure: {e!r}", flush=True)
+        raise
 
 
 @app.route("/api/gold")
@@ -1108,6 +1121,8 @@ def gold_debug():
         "labels": GOLD_LABELS,
         "cache_seconds_old": round(time.time() - _gold_cache["ts"], 1) if _gold_cache.get("data") else None,
         "cached_data": _gold_cache.get("data"),
+        "last_attempt_seconds_ago": round(time.time() - _gold_status["last_attempt"], 1) if _gold_status["last_attempt"] else None,
+        "last_error": _gold_status["last_error"],
     })
 
 
