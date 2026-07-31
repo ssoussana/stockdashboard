@@ -105,15 +105,17 @@ _sma_cache = {}      # symbol -> {"data": {...}, "ts": float}
 
 # The full set of symbols anyone's watchlist currently includes. Grows as
 # people add tickers; the SMA background loop iterates over this each pass.
-# Nothing removes a symbol from a browser's list on the server directly
-# (watchlists are per-browser, stored client-side), so this tracks *when*
-# each symbol was last actually requested and drops stale ones out of the
-# background pass — otherwise a symbol tested once and later removed from
-# every browser's list would keep consuming rate-limit budget forever.
-_known_symbols = set(DEFAULT_SYMBOLS)
-# Seeded with the current time so defaults aren't wrongly treated as
+# A symbol only leaves the background rotation via the TTL check below —
+# nothing explicitly removes it when a user removes it from the shared
+# watchlist. Seeded from BOTH the hardcoded defaults and the persisted
+# shared watchlist (not just the defaults) — otherwise every restart would
+# treat the full existing watchlist as "brand new," firing an immediate-fetch
+# thread per symbol all at once and flooding the shared rate-limit budget
+# before the main scheduled pass ever gets a fair turn at it.
+_known_symbols = set(DEFAULT_SYMBOLS) | set(_shared_watchlist)
+# Seeded with the current time so none of these are wrongly treated as
 # "stale" by the TTL check before any real browser request ever arrives.
-_known_last_seen = {sym: time.time() for sym in DEFAULT_SYMBOLS}
+_known_last_seen = {sym: time.time() for sym in _known_symbols}
 _known_lock = threading.Lock()
 _wake_event = threading.Event()  # lets a newly-added symbol skip the long wait
 KNOWN_SYMBOL_TTL = 2 * 60 * 60  # drop from background refresh after 2h of no requests
@@ -703,6 +705,15 @@ def movers():
     if _movers_cache["data"] is None:
         return jsonify({"error": "not fetched yet", "gainers": [], "losers": []})
     return jsonify(_movers_cache["data"])
+
+
+@app.route("/api/debug/movers")
+def movers_debug():
+    return jsonify({
+        "fmp_key_set": bool(FMP_API_KEY),
+        "cache_seconds_old": round(time.time() - _movers_cache["ts"], 1) if _movers_cache["data"] else None,
+        "cached_data": _movers_cache["data"],
+    })
 
 
 def _movers_background_loop():
