@@ -14,6 +14,9 @@ Setup:
     export FMP_API_KEY="your-key-here"           (optional, powers the market-movers
         list — free at financialmodelingprep.com, no card required. Without it, that
         section is just empty.)
+    export FRED_API_KEY="your-key-here"           (optional, powers real crude oil
+        $/barrel and 10Y Treasury yield — free at fredaccount.stlouisfed.org, no
+        card required, no paid tiers at all. Without it, that section is empty.)
     python app.py
 
 Then open http://localhost:5000
@@ -44,6 +47,9 @@ TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
 # Optional — only needed for the market-movers (gainers/losers) list.
 FMP_API_KEY = os.environ.get("FMP_API_KEY")
+
+# Optional — only needed for real crude oil/treasury-yield data.
+FRED_API_KEY = os.environ.get("FRED_API_KEY")
 
 DEFAULT_SYMBOLS = ["PLTR", "NVDA", "CLS", "NBIS", "HOOD", "SPY", "QQQ",
                     "GLW", "CRDO", "COHR", "SOXL", "DRAM", "IREN"]
@@ -592,32 +598,66 @@ threading.Thread(target=_movers_background_loop, daemon=True).start()
 
 
 # ---------- Macro (crude oil, 10-year Treasury yield) ----------
-MACRO_CACHE_SECONDS = 15 * 60
+MACRO_CACHE_SECONDS = 60 * 60  # FRED itself only updates once per business day
 _macro_cache = {"data": None, "ts": 0}
-MACRO_SYMBOLS = {"crude_oil": "WTI/USD", "treasury_10y": "US10Y"}
+MACRO_SERIES = {"crude_oil": "DCOILWTICO", "treasury_10y": "DGS10"}
+MACRO_LABELS = {"crude_oil": "Crude Oil, WTI $/barrel (FRED)", "treasury_10y": "10Y Treasury Yield (FRED)"}
+
+
+def fetch_fred_series(series_id):
+    """Latest two valid observations for a FRED series, used to compute the
+    latest value plus day-over-day change. FRED sometimes reports the most
+    recent date(s) as "." (not yet published) — pulling a handful of recent
+    observations and skipping missing ones handles that."""
+    r = _http.get(
+        "https://api.stlouisfed.org/fred/series/observations",
+        params={
+            "series_id": series_id,
+            "api_key": FRED_API_KEY,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": 10,
+        },
+        timeout=(5, 15),
+    )
+    r.raise_for_status()
+    payload = r.json()
+    if "error_message" in payload:
+        raise ValueError(payload["error_message"])
+
+    valid = [o for o in payload.get("observations", []) if o.get("value") not in (None, ".")]
+    if not valid:
+        raise ValueError("no published observations")
+
+    latest = float(valid[0]["value"])
+    result = {"value": latest, "date": valid[0]["date"], "change": None, "percent_change": None}
+    if len(valid) > 1:
+        prev = float(valid[1]["value"])
+        result["change"] = latest - prev
+        result["percent_change"] = (latest - prev) / prev * 100 if prev else None
+    return result
 
 
 def fetch_macro_all():
-    print("[macro] requesting crude oil and 10Y treasury yield", flush=True)
-    acquire_twelvedata_credits(len(MACRO_SYMBOLS))
+    """Real crude oil ($/barrel) and real 10-year Treasury yield, straight
+    from FRED (the St. Louis Fed) — the actual official government data,
+    not an ETF proxy. Free with no paid tiers, but only updates once per
+    business day (not intraday), which is why this refreshes hourly rather
+    than every minute — checking more often wouldn't find anything new."""
+    print("[macro] requesting crude oil and 10Y treasury from FRED", flush=True)
     out = {}
-    for key, symbol in MACRO_SYMBOLS.items():
+    for key, series_id in MACRO_SERIES.items():
         try:
-            r = twelvedata_get(
-                "https://api.twelvedata.com/quote",
-                params={"symbol": symbol, "apikey": TWELVE_DATA_API_KEY},
-            )
-            data = r.json()
-            if data.get("status") == "error" or data.get("close") is None:
-                raise ValueError(data.get("message", "no data returned"))
+            r = fetch_fred_series(series_id)
             out[key] = {
                 "ok": True,
-                "value": round(float(data["close"]), 2),
-                "change": round(float(data.get("change", 0)), 2),
-                "percent_change": round(float(data.get("percent_change", 0)), 2),
+                "value": round(r["value"], 2),
+                "change": round(r["change"], 2) if r["change"] is not None else None,
+                "percent_change": round(r["percent_change"], 2) if r["percent_change"] is not None else None,
+                "as_of": r["date"],
             }
         except Exception as e:
-            print(f"[macro] {key} ({symbol}) failed: {e!r}", flush=True)
+            print(f"[macro] {key} ({series_id}) failed: {e!r}", flush=True)
             out[key] = {"ok": False, "error": str(e)}
     _macro_cache["data"] = out
     _macro_cache["ts"] = time.time()
@@ -626,18 +666,20 @@ def fetch_macro_all():
 
 @app.route("/api/macro")
 def macro():
-    if not TWELVE_DATA_API_KEY:
-        return jsonify({k: {"ok": False, "error": "TWELVE_DATA_API_KEY not set"} for k in MACRO_SYMBOLS})
+    if not FRED_API_KEY:
+        return jsonify({k: {"ok": False, "error": "FRED_API_KEY not set"} for k in MACRO_SERIES})
     if _macro_cache["data"] is None:
-        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in MACRO_SYMBOLS})
+        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in MACRO_SERIES})
     return jsonify(_macro_cache["data"])
 
 
 @app.route("/api/debug/macro")
 def macro_debug():
     return jsonify({
-        "twelve_data_key_set": bool(TWELVE_DATA_API_KEY),
-        "symbols": MACRO_SYMBOLS,
+        "data_source": "FRED (St. Louis Fed) — real values, updates once/day",
+        "fred_key_set": bool(FRED_API_KEY),
+        "series": MACRO_SERIES,
+        "labels": MACRO_LABELS,
         "cache_seconds_old": round(time.time() - _macro_cache["ts"], 1) if _macro_cache["data"] else None,
         "cached_data": _macro_cache["data"],
     })
@@ -646,14 +688,13 @@ def macro_debug():
 def _macro_background_loop():
     print("[macro] background thread started", flush=True)
     while True:
-        if TWELVE_DATA_API_KEY:
+        if FRED_API_KEY:
             try:
-                fetch_macro_all()  # acquire_twelvedata_credits() inside this
-                                    # already coordinates with the SMA/after-
-                                    # hours loops' credit usage — no extra
-                                    # lock needed here.
+                fetch_macro_all()
             except Exception as e:
                 print(f"[macro] fetch_macro_all raised: {e!r}", flush=True)
+        else:
+            print("[macro] FRED_API_KEY not set, skipping", flush=True)
         time.sleep(MACRO_CACHE_SECONDS)
 
 

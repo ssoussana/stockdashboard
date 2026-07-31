@@ -80,7 +80,11 @@
     padding:10px 24px 22px;margin-top:-10px;margin-bottom:22px;
     font-family:var(--mono);font-size:12px;color:var(--muted);
   }
-  .index-strip .idx{display:flex;align-items:baseline;gap:7px;}
+  @media (min-width:820px){
+    .index-strip{flex-wrap:nowrap;overflow-x:auto;gap:20px;}
+  }
+  .index-strip .idx{display:flex;align-items:baseline;gap:7px;white-space:nowrap;flex-shrink:0;}
+  #indexStripCore{display:contents;}
   .index-strip .idx .name{color:var(--muted-dim);}
   .index-strip .idx .val{color:var(--text);font-weight:600;}
   .index-strip .idx .chg.up{color:var(--green);}
@@ -221,8 +225,8 @@
       <span class="idx"><span class="name">NASDAQ</span> <span class="val">&mdash;</span></span>
       <span class="idx"><span class="name">S&amp;P 500</span> <span class="val">&mdash;</span></span>
     </span>
-    <span class="idx"><span class="name">CRUDE OIL</span> <span class="val" id="macroOilVal">&mdash;</span></span>
-    <span class="idx"><span class="name">10Y TREASURY</span> <span class="val" id="macroTreasuryVal">&mdash;</span></span>
+    <span class="idx" title="WTI crude oil, real $/barrel — FRED (St. Louis Fed), updates once per business day"><span class="name">CRUDE OIL</span> <span class="val" id="macroOilVal">&mdash;</span></span>
+    <span class="idx" title="10-Year Treasury Constant Maturity Rate, real yield — FRED (St. Louis Fed), updates once per business day"><span class="name">10Y TREASURY</span> <span class="val" id="macroTreasuryVal">&mdash;</span></span>
   </div>
 
   <section class="movers-panel">
@@ -566,7 +570,11 @@ function renderMacroValue(elId, entry, formatter){
     el.title = (entry && entry.error) || '';
     return;
   }
-  el.title = '';
+  el.title = entry.as_of ? `as of ${entry.as_of}` : '';
+  if(entry.percent_change == null){
+    el.textContent = formatter(entry.value);
+    return;
+  }
   const up = entry.percent_change >= 0;
   el.innerHTML = `${formatter(entry.value)} <span class="chg ${up?'up':'down'}">${up?'+':''}${entry.percent_change.toFixed(2)}%</span>`;
 }
