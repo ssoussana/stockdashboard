@@ -216,9 +216,13 @@
   </section>
 
   <div class="index-strip" id="indexStrip">
-    <span class="idx"><span class="name">DOW</span> <span class="val">&mdash;</span></span>
-    <span class="idx"><span class="name">NASDAQ</span> <span class="val">&mdash;</span></span>
-    <span class="idx"><span class="name">S&amp;P 500</span> <span class="val">&mdash;</span></span>
+    <span id="indexStripCore">
+      <span class="idx"><span class="name">DOW</span> <span class="val">&mdash;</span></span>
+      <span class="idx"><span class="name">NASDAQ</span> <span class="val">&mdash;</span></span>
+      <span class="idx"><span class="name">S&amp;P 500</span> <span class="val">&mdash;</span></span>
+    </span>
+    <span class="idx"><span class="name">CRUDE OIL</span> <span class="val" id="macroOilVal">&mdash;</span></span>
+    <span class="idx"><span class="name">10Y TREASURY</span> <span class="val" id="macroTreasuryVal">&mdash;</span></span>
   </div>
 
   <section class="movers-panel">
@@ -529,7 +533,7 @@ const INDEX_PROXIES = [
 ];
 
 function renderIndexStrip(market){
-  const strip = document.getElementById('indexStrip');
+  const strip = document.getElementById('indexStripCore');
   if(!market){ return; }
   strip.innerHTML = INDEX_PROXIES.map(({label, sym}) => {
     const m = market[sym];
@@ -541,6 +545,30 @@ function renderIndexStrip(market){
       <span class="chg ${up?'up':'down'}">${up?'+':''}${m.pct.toFixed(2)}%</span>
     </span>`;
   }).join('');
+}
+
+async function refreshMacro(){
+  try{
+    const res = await fetch('/api/macro');
+    const data = await res.json();
+    renderMacroValue('macroOilVal', data.crude_oil, v => `$${v.toFixed(2)}`);
+    renderMacroValue('macroTreasuryVal', data.treasury_10y, v => `${v.toFixed(2)}%`);
+  }catch(e){
+    document.getElementById('macroOilVal').textContent = '\u2014';
+    document.getElementById('macroTreasuryVal').textContent = '\u2014';
+  }
+}
+
+function renderMacroValue(elId, entry, formatter){
+  const el = document.getElementById(elId);
+  if(!entry || !entry.ok || entry.value == null){
+    el.textContent = '\u2014';
+    el.title = (entry && entry.error) || '';
+    return;
+  }
+  el.title = '';
+  const up = entry.percent_change >= 0;
+  el.innerHTML = `${formatter(entry.value)} <span class="chg ${up?'up':'down'}">${up?'+':''}${entry.percent_change.toFixed(2)}%</span>`;
 }
 
 // ---------- orchestration ----------
@@ -685,9 +713,11 @@ document.addEventListener('click', (e) => {
   refreshAll();
   refreshSma();
   refreshMovers();
+  refreshMacro();
   setInterval(refreshAll, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(refreshMovers, 10 * 60 * 1000);
+  setInterval(refreshMacro, 15 * 60 * 1000);
   setInterval(tickCountdown, 1000);
 })();
 </script>

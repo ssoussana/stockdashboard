@@ -577,6 +577,64 @@ def _movers_background_loop():
 threading.Thread(target=_movers_background_loop, daemon=True).start()
 
 
+# ---------- Macro (crude oil, 10-year Treasury yield) ----------
+MACRO_CACHE_SECONDS = 15 * 60
+_macro_cache = {"data": None, "ts": 0}
+MACRO_SYMBOLS = {"crude_oil": "WTI/USD", "treasury_10y": "US10Y"}
+
+
+def fetch_macro_all():
+    print("[macro] requesting crude oil and 10Y treasury yield", flush=True)
+    acquire_twelvedata_credits(len(MACRO_SYMBOLS))
+    out = {}
+    for key, symbol in MACRO_SYMBOLS.items():
+        try:
+            r = _http.get(
+                "https://api.twelvedata.com/quote",
+                params={"symbol": symbol, "apikey": TWELVE_DATA_API_KEY},
+                timeout=(5, 15),
+            )
+            data = r.json()
+            if data.get("status") == "error" or data.get("close") is None:
+                raise ValueError(data.get("message", "no data returned"))
+            out[key] = {
+                "ok": True,
+                "value": round(float(data["close"]), 2),
+                "change": round(float(data.get("change", 0)), 2),
+                "percent_change": round(float(data.get("percent_change", 0)), 2),
+            }
+        except Exception as e:
+            print(f"[macro] {key} ({symbol}) failed: {e!r}", flush=True)
+            out[key] = {"ok": False, "error": str(e)}
+    _macro_cache["data"] = out
+    _macro_cache["ts"] = time.time()
+    print(f"[macro] updated: {out}", flush=True)
+
+
+@app.route("/api/macro")
+def macro():
+    if not TWELVE_DATA_API_KEY:
+        return jsonify({k: {"ok": False, "error": "TWELVE_DATA_API_KEY not set"} for k in MACRO_SYMBOLS})
+    if _macro_cache["data"] is None:
+        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in MACRO_SYMBOLS})
+    return jsonify(_macro_cache["data"])
+
+
+def _macro_background_loop():
+    print("[macro] background thread started", flush=True)
+    while True:
+        if TWELVE_DATA_API_KEY:
+            with _twelvedata_pass_lock:
+                try:
+                    fetch_macro_all()
+                except Exception as e:
+                    print(f"[macro] fetch_macro_all raised: {e!r}", flush=True)
+        time.sleep(MACRO_CACHE_SECONDS)
+
+
+threading.Thread(target=_macro_background_loop, daemon=True).start()
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"Default watchlist: {', '.join(DEFAULT_SYMBOLS)}")
