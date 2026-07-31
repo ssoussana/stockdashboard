@@ -289,7 +289,17 @@ def search():
         return jsonify([])
 
 
-TWELVE_DATA_BATCH_SIZE = 8   # free-tier limit: 8 credits/minute
+TWELVE_DATA_BATCH_SIZE = 4   # free-tier limit is 8 credits/minute, but this
+                              # is set to 4 (half) deliberately: Render can
+                              # briefly run two worker processes at once
+                              # during a deploy, each with its own
+                              # independent budget tracker — confirmed via
+                              # the account's own usage graph showing a
+                              # 23-credit spike in one minute against the
+                              # real 8/min limit. Halving this means even a
+                              # two-worker overlap (4+4=8) stays within the
+                              # real account-wide limit instead of doubling
+                              # past it.
 
 # One shared limiter for every Twelve Data call, whichever feature makes it
 # (SMA/RSI's scheduled pass, an immediate one-off add, or after-hours
@@ -302,6 +312,7 @@ _credit_timestamps = collections.deque()
 
 
 def acquire_twelvedata_credits(n):
+    waited = 0
     while True:
         with _credit_lock:
             now = time.time()
@@ -311,7 +322,12 @@ def acquire_twelvedata_credits(n):
                 for _ in range(n):
                     _credit_timestamps.append(now)
                 return
+            in_use = len(_credit_timestamps)
+        if waited and waited % 30 == 0:
+            print(f"[twelvedata] still waiting for {n} credit(s) after {waited}s "
+                  f"({in_use}/{TWELVE_DATA_BATCH_SIZE} in use)", flush=True)
         time.sleep(2)
+        waited += 2
 
 
 def twelvedata_get(url, params, timeout=(5, 15)):
@@ -351,7 +367,7 @@ def compute_rsi14(closes, period=14):
 
 
 def fetch_sma_batch(symbols):
-    """One HTTP call per batch of up to 8 symbols — Twelve Data accepts
+    """One HTTP call per batch (size set by TWELVE_DATA_BATCH_SIZE) — Twelve Data accepts
     comma-separated symbols in a single request, so this needs far fewer
     round trips than fetching one symbol at a time."""
     acquire_twelvedata_credits(len(symbols))
@@ -426,8 +442,15 @@ def fetch_sma_all(symbols):
     at the end — so results (or a real error) show up within seconds
     instead of only after the full pass. Pacing between batches happens
     automatically inside fetch_sma_batch via the shared credit limiter."""
+    total_batches = (len(symbols) + TWELVE_DATA_BATCH_SIZE - 1) // TWELVE_DATA_BATCH_SIZE
+    _sma_status["total_batches"] = total_batches
     for i in range(0, len(symbols), TWELVE_DATA_BATCH_SIZE):
+        batch_num = i // TWELVE_DATA_BATCH_SIZE + 1
         batch = symbols[i:i + TWELVE_DATA_BATCH_SIZE]
+        _sma_status["current_batch"] = batch_num
+        _sma_status["current_batch_started"] = time.time()
+        _sma_status["current_step"] = "acquiring credits"
+        print(f"[sma] batch {batch_num}/{total_batches}: acquiring credits for {batch}", flush=True)
         try:
             batch_out = fetch_sma_batch(batch)
         except Exception as e:
@@ -436,6 +459,8 @@ def fetch_sma_all(symbols):
         now = time.time()
         for sym, data in batch_out.items():
             _sma_cache[sym] = {"data": data, "ts": now}
+        _sma_status["current_step"] = "batch complete"
+    _sma_status["current_batch"] = None
     print("[sma] pass complete", flush=True)
 
 
@@ -454,7 +479,11 @@ def sma():
             out[sym] = entry["data"]
         else:
             elapsed = int(time.time() - _sma_status["attempt_started"])
-            out[sym] = {"ok": False, "error": f"not fetched yet ({elapsed}s since current pass started)"}
+            progress = ""
+            if _sma_status.get("current_batch"):
+                progress = (f", batch {_sma_status['current_batch']}/{_sma_status.get('total_batches','?')}"
+                            f" ({_sma_status.get('current_step','?')})")
+            out[sym] = {"ok": False, "error": f"not fetched yet ({elapsed}s since current pass started{progress})"}
     return jsonify(out)
 
 
@@ -521,7 +550,7 @@ def market_session_now():
 
 
 def fetch_afterhours_batch(symbols):
-    """One HTTP call per batch of up to 8 symbols, using Twelve Data's
+    """One HTTP call per batch (size set by TWELVE_DATA_BATCH_SIZE), using Twelve Data's
     prepost=true quote option to get the latest extended-hours print
     alongside the regular session's numbers."""
     acquire_twelvedata_credits(len(symbols))
