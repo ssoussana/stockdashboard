@@ -27,7 +27,7 @@ import json
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 import requests
@@ -729,7 +729,7 @@ MOVERS_CACHE_SECONDS = 10 * 60  # FMP free tier: 250 requests/day — keep this 
 _movers_cache = {"data": None, "ts": 0}
 
 
-def fetch_movers_list(endpoint):
+def _fetch_movers_list_raw(endpoint):
     r = _http.get(
         f"https://financialmodelingprep.com/stable/{endpoint}",
         params={"apikey": FMP_API_KEY},
@@ -755,6 +755,27 @@ def fetch_movers_list(endpoint):
         for item in data[:5]
         if item.get("symbol")
     ]
+
+
+_movers_fetch_executor = ThreadPoolExecutor(max_workers=4)  # more than 1 —
+    # result(timeout=...) abandons a stuck call from the caller's side but
+    # doesn't kill the underlying thread, so a genuinely-hung request would
+    # otherwise permanently occupy the only worker and block every future
+    # attempt from ever getting a fresh connection
+
+
+def fetch_movers_list(endpoint):
+    """Wraps the raw fetch with a hard-enforced 25s timeout from the
+    OUTSIDE, via a thread that gets abandoned if it doesn't return in
+    time — confirmed via /api/debug/movers that a real request can sit
+    unfinished for minutes despite requests' own (5,15)s timeout, which
+    points to something (likely DNS resolution) that timeout doesn't
+    reliably cover on this host."""
+    future = _movers_fetch_executor.submit(_fetch_movers_list_raw, endpoint)
+    try:
+        return future.result(timeout=25)
+    except FutureTimeoutError:
+        raise TimeoutError(f"{endpoint} hard-timed-out after 25s (request never returned — likely a DNS/network hang)")
 
 
 _movers_status = {"last_attempt": None, "last_error": None}
