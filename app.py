@@ -620,15 +620,27 @@ def macro():
     return jsonify(_macro_cache["data"])
 
 
+@app.route("/api/debug/macro")
+def macro_debug():
+    return jsonify({
+        "twelve_data_key_set": bool(TWELVE_DATA_API_KEY),
+        "symbols": MACRO_SYMBOLS,
+        "cache_seconds_old": round(time.time() - _macro_cache["ts"], 1) if _macro_cache["data"] else None,
+        "cached_data": _macro_cache["data"],
+    })
+
+
 def _macro_background_loop():
     print("[macro] background thread started", flush=True)
     while True:
         if TWELVE_DATA_API_KEY:
-            with _twelvedata_pass_lock:
-                try:
-                    fetch_macro_all()
-                except Exception as e:
-                    print(f"[macro] fetch_macro_all raised: {e!r}", flush=True)
+            try:
+                fetch_macro_all()  # acquire_twelvedata_credits() inside this
+                                    # already coordinates with the SMA/after-
+                                    # hours loops' credit usage — no extra
+                                    # lock needed here.
+            except Exception as e:
+                print(f"[macro] fetch_macro_all raised: {e!r}", flush=True)
         time.sleep(MACRO_CACHE_SECONDS)
 
 
