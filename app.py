@@ -97,6 +97,7 @@ print(f"[watchlist] using {WATCHLIST_FILE} (DATA_DIR={'set' if 'DATA_DIR' in os.
 # 512MB), that per-call overhead was likely a real contributor to the OOM
 # kills we've been seeing — those wipe every in-memory cache when they
 # happen, which explains a lot of the "why did this reset" confusion.
+_process_started_at = time.time()
 _http = requests.Session()
 
 CACHE_SECONDS = 60  # per-symbol, shared across all visitors requesting that symbol
@@ -821,6 +822,8 @@ def movers_debug():
         "cached_data": _movers_cache["data"],
         "last_attempt_seconds_ago": round(time.time() - _movers_status["last_attempt"], 1) if _movers_status["last_attempt"] else None,
         "last_error": _movers_status["last_error"],
+        "process_id": os.getpid(),
+        "process_uptime_seconds": round(time.time() - _process_started_at, 1),
     })
 
 
