@@ -987,6 +987,18 @@ def gold():
 
 @app.route("/api/debug/gold")
 def gold_debug():
+    now = time.time()
+    history_summary = {}
+    for key, entries in _gold_history.items():
+        if entries:
+            oldest_age_hours = round((now - min(e["ts"] for e in entries)) / 3600, 2)
+            history_summary[key] = {
+                "entries": len(entries),
+                "oldest_entry_age_hours": oldest_age_hours,
+                "has_24h_reference": oldest_age_hours >= 24,
+            }
+        else:
+            history_summary[key] = {"entries": 0}
     return jsonify({
         "symbols": GOLD_SYMBOLS,
         "labels": GOLD_LABELS,
@@ -994,6 +1006,7 @@ def gold_debug():
         "cached_data": _gold_cache.get("data"),
         "last_attempt_seconds_ago": round(time.time() - _gold_status["last_attempt"], 1) if _gold_status["last_attempt"] else None,
         "last_error": _gold_status["last_error"],
+        "history": history_summary,
     })
 
 
