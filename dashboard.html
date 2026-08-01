@@ -62,7 +62,7 @@
     display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:22px;
   }
   @media (min-width:640px){ .top-panels{grid-template-columns:1fr 1fr;} }
-  @media (min-width:1500px){ .top-panels{grid-template-columns:260px 1fr 1fr 1fr;} }
+  @media (min-width:1500px){ .top-panels{grid-template-columns:260px 1fr 1fr 1fr 1fr;} }
   .gauge-wrap{display:flex;flex-direction:column;align-items:center;cursor:help;}
   .gauge-score{font-family:var(--sans);font-weight:800;font-size:44px;margin-top:-38px;letter-spacing:-0.02em;}
   .gauge-label{font-family:var(--mono);font-size:13px;letter-spacing:.06em;margin-top:2px;}
@@ -227,6 +227,10 @@
     <div class="movers-col">
       <h2>Top Losers</h2>
       <div class="movers-list" id="losersList"><div class="movers-empty">Loading&hellip;</div></div>
+    </div>
+    <div class="movers-col">
+      <h2>Fed Calendar</h2>
+      <div class="movers-list" id="fedCalendarList"><div class="movers-empty">Loading&hellip;</div></div>
     </div>
   </div>
 
@@ -661,6 +665,55 @@ function fmtRevenue(v){
   return '$'+Number(v).toLocaleString();
 }
 
+function daysAwayLabel(date, today){
+  const days = Math.round((date - today) / 86400000);
+  if(days === 0) return 'today';
+  if(days === 1) return 'tomorrow';
+  if(days < 0) return `${-days}d ago`;
+  return `in ${days}d`;
+}
+
+async function refreshFedCalendar(){
+  const el = document.getElementById('fedCalendarList');
+  try{
+    const res = await fetch('/api/fed-calendar');
+    const data = await res.json();
+    const today = new Date(); today.setHours(0,0,0,0);
+
+    const rows = [];
+
+    if(data.cpi && data.cpi.ok && data.cpi.next_date){
+      const d = new Date(data.cpi.next_date + 'T00:00:00');
+      rows.push({ label: 'Next CPI', dateStr: d.toLocaleDateString(undefined,{month:'short',day:'numeric'}), when: daysAwayLabel(d, today) });
+    }
+    if(data.ppi && data.ppi.ok && data.ppi.next_date){
+      const d = new Date(data.ppi.next_date + 'T00:00:00');
+      rows.push({ label: 'Next PPI', dateStr: d.toLocaleDateString(undefined,{month:'short',day:'numeric'}), when: daysAwayLabel(d, today) });
+    }
+    if(data.fomc && data.fomc.ok && data.fomc.start){
+      const dStart = new Date(data.fomc.start + 'T00:00:00');
+      const dEnd = data.fomc.end ? new Date(data.fomc.end + 'T00:00:00') : dStart;
+      const startStr = dStart.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+      const endStr = dEnd.toLocaleDateString(undefined,{day:'numeric'});
+      rows.push({ label: 'Next FOMC', dateStr: `${startStr}\u2013${endStr}`, when: daysAwayLabel(dStart, today) });
+    }
+
+    if(!rows.length){
+      el.innerHTML = `<div class="movers-empty">${(data.cpi && data.cpi.error) || 'unavailable'}</div>`;
+      return;
+    }
+
+    el.innerHTML = rows.map(r => `
+      <div class="movers-row">
+        <span><span class="sym">${r.label}</span><span class="name">${r.dateStr}</span></span>
+        <span class="pct">${r.when}</span>
+      </div>
+    `).join('');
+  }catch(e){
+    el.innerHTML = `<div class="movers-empty">unavailable</div>`;
+  }
+}
+
 async function refreshEarnings(){
   const el = document.getElementById('earningsList');
   try{
@@ -823,12 +876,14 @@ document.addEventListener('click', (e) => {
   refreshMacro();
   refreshEarnings();
   refreshGold();
+  refreshFedCalendar();
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(refreshMovers, 15 * 60 * 1000);
   setInterval(refreshMacro, 15 * 60 * 1000);
   setInterval(refreshEarnings, 60 * 60 * 1000);
   setInterval(refreshGold, 60 * 60 * 1000);
+  setInterval(refreshFedCalendar, 60 * 60 * 1000);
   setInterval(tickCountdown, 1000);
 })();
 </script>

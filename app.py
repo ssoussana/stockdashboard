@@ -1024,6 +1024,133 @@ def _gold_background_loop():
 threading.Thread(target=_gold_background_loop, daemon=True).start()
 
 
+# ---------- Fed calendar: next CPI, next PPI, next FOMC meeting ----------
+FED_CACHE_SECONDS = 24 * 60 * 60  # these schedules don't change intraday
+_fed_cache = load_json_cache("fed_cache.json")
+
+# FRED release IDs (fixed, don't change): CPI = 10, PPI = 46.
+FRED_RELEASE_IDS = {"cpi": 10, "ppi": 46}
+
+# FOMC meeting dates aren't a "data release" FRED tracks, so this is a
+# maintained schedule instead — sourced from the Federal Reserve's own
+# published calendar (federalreserve.gov/monetarypolicy/fomccalendars.htm).
+# The Fed publishes a new year's dates about 6-12 months ahead; this list
+# needs a manual update roughly once a year when that happens. 2027 dates
+# are the Fed's own "tentative" preview and could shift slightly.
+FOMC_MEETINGS = [
+    {"start": "2026-09-15", "end": "2026-09-16"},
+    {"start": "2026-10-27", "end": "2026-10-28"},
+    {"start": "2026-12-08", "end": "2026-12-09"},
+    {"start": "2027-01-26", "end": "2027-01-27"},
+    {"start": "2027-03-16", "end": "2027-03-17"},
+    {"start": "2027-04-27", "end": "2027-04-28"},
+    {"start": "2027-06-08", "end": "2027-06-09"},
+    {"start": "2027-07-27", "end": "2027-07-28"},
+    {"start": "2027-09-14", "end": "2027-09-15"},
+    {"start": "2027-10-26", "end": "2027-10-27"},
+    {"start": "2027-12-07", "end": "2027-12-08"},
+]
+
+
+def fetch_next_fred_release(release_id):
+    today = datetime.now().date().isoformat()
+    r = _http.get(
+        "https://api.stlouisfed.org/fred/release/dates",
+        params={
+            "release_id": release_id,
+            "api_key": FRED_API_KEY,
+            "file_type": "json",
+            "realtime_start": today,
+            "include_release_dates_with_no_data": "true",  # needed to see
+                                                             # future scheduled
+                                                             # dates, not just
+                                                             # ones with data
+                                                             # already attached
+            "sort_order": "asc",
+            "limit": 1,
+        },
+        timeout=(5, 15),
+    )
+    r.raise_for_status()
+    payload = r.json()
+    if "error_message" in payload:
+        raise ValueError(payload["error_message"])
+    dates = payload.get("release_dates", [])
+    if not dates:
+        raise ValueError("no upcoming release date found")
+    return dates[0]["date"]
+
+
+def next_fomc_meeting():
+    today = datetime.now().date().isoformat()
+    upcoming = [m for m in FOMC_MEETINGS if m["end"] >= today]
+    return upcoming[0] if upcoming else None
+
+
+def fetch_fed_calendar():
+    print("[fed] requesting next CPI/PPI release dates", flush=True)
+    out = {}
+    for key, release_id in FRED_RELEASE_IDS.items():
+        try:
+            out[key] = {"ok": True, "next_date": fetch_next_fred_release(release_id)}
+        except Exception as e:
+            print(f"[fed] {key} failed: {e!r}", flush=True)
+            out[key] = {"ok": False, "error": str(e)}
+
+    meeting = next_fomc_meeting()
+    if meeting:
+        out["fomc"] = {"ok": True, "start": meeting["start"], "end": meeting["end"]}
+    else:
+        out["fomc"] = {"ok": False, "error": "no meeting found in the maintained schedule — needs updating"}
+
+    _fed_cache["data"] = out
+    _fed_cache["ts"] = time.time()
+    save_json_cache("fed_cache.json", _fed_cache)
+    print(f"[fed] updated: {out}", flush=True)
+
+
+@app.route("/api/fed-calendar")
+def fed_calendar():
+    if not FRED_API_KEY:
+        return jsonify({
+            "cpi": {"ok": False, "error": "FRED_API_KEY not set"},
+            "ppi": {"ok": False, "error": "FRED_API_KEY not set"},
+            "fomc": {"ok": True, **(next_fomc_meeting() or {"start": None, "end": None})},
+        })
+    if _fed_cache.get("data") is None:
+        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "fomc")})
+    return jsonify(_fed_cache["data"])
+
+
+@app.route("/api/debug/fed-calendar")
+def fed_calendar_debug():
+    return jsonify({
+        "fred_key_set": bool(FRED_API_KEY),
+        "release_ids": FRED_RELEASE_IDS,
+        "cache_seconds_old": round(time.time() - _fed_cache["ts"], 1) if _fed_cache.get("data") else None,
+        "cached_data": _fed_cache.get("data"),
+        "next_fomc_from_schedule": next_fomc_meeting(),
+        "fomc_schedule_last_entry": FOMC_MEETINGS[-1] if FOMC_MEETINGS else None,
+    })
+
+
+def _fed_background_loop():
+    print("[fed] background thread started", flush=True)
+    time.sleep(25)  # staggered — see movers loop comment
+    while True:
+        if FRED_API_KEY:
+            try:
+                fetch_fed_calendar()
+            except Exception as e:
+                print(f"[fed] fetch_fed_calendar raised: {e!r}", flush=True)
+        else:
+            print("[fed] FRED_API_KEY not set, skipping", flush=True)
+        time.sleep(FED_CACHE_SECONDS)
+
+
+threading.Thread(target=_fed_background_loop, daemon=True).start()
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"Default watchlist: {', '.join(DEFAULT_SYMBOLS)}")
