@@ -561,7 +561,7 @@ threading.Thread(target=_sma_background_loop, daemon=True).start()
 
 # ---------- Market movers (top gainers/losers, whole-market — not tied to
 # the watchlist) ----------
-MOVERS_CACHE_SECONDS = 10 * 60  # FMP free tier: 250 requests/day — keep this gentle
+MOVERS_CACHE_SECONDS = 15 * 60  # FMP free tier: 250 requests/day — keep this gentle
 _movers_cache = {"data": None, "ts": 0}
 
 

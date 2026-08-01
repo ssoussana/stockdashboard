@@ -75,7 +75,7 @@
     padding:10px 24px 22px;margin-top:-10px;margin-bottom:22px;
     font-family:var(--mono);font-size:14px;color:var(--text);
   }
-  @media (min-width:820px){
+  @media (min-width:1500px){
     .index-strip{flex-wrap:nowrap;overflow-x:auto;gap:22px;}
   }
   .index-strip .idx{display:flex;align-items:baseline;gap:8px;white-space:nowrap;flex-shrink:0;}
@@ -84,8 +84,6 @@
   .index-strip .idx .val{color:var(--text);font-weight:600;}
   .index-strip .idx .chg.up{color:var(--green);}
   .index-strip .idx .chg.down{color:var(--red);}
-  #indexStrip{padding-bottom:6px;margin-bottom:6px;}
-  #indexStrip2{padding-top:0;margin-top:0;margin-bottom:22px;}
 
   /* Market movers */
   .movers-col{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;}
@@ -237,9 +235,6 @@
     </span>
     <span class="idx" title="WTI crude oil, real $/barrel — FRED (St. Louis Fed), updates once per business day"><span class="name">CRUDE OIL</span> <span class="val" id="macroOilVal">&mdash;</span></span>
     <span class="idx" title="10-Year Treasury Constant Maturity Rate, real yield — FRED (St. Louis Fed), updates once per business day"><span class="name">10Y TREASURY</span> <span class="val" id="macroTreasuryVal">&mdash;</span></span>
-  </div>
-
-  <div class="index-strip" id="indexStrip2">
     <span class="idx" title="Gold spot price per troy ounce — updates hourly"><span class="name">GOLD</span> <span class="val" id="goldVal">&mdash;</span></span>
     <span class="idx" title="Silver spot price per troy ounce — updates hourly"><span class="name">SILVER</span> <span class="val" id="silverVal">&mdash;</span></span>
     <span class="idx" title="Bitcoin price — updates hourly"><span class="name">BITCOIN</span> <span class="val" id="bitcoinVal">&mdash;</span></span>
@@ -823,7 +818,7 @@ document.addEventListener('click', (e) => {
   refreshGold();
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
-  setInterval(refreshMovers, 10 * 60 * 1000);
+  setInterval(refreshMovers, 15 * 60 * 1000);
   setInterval(refreshMacro, 15 * 60 * 1000);
   setInterval(refreshEarnings, 60 * 60 * 1000);
   setInterval(refreshGold, 60 * 60 * 1000);
