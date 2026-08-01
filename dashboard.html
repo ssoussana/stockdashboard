@@ -150,14 +150,10 @@
     font-size:15px;line-height:1;cursor:pointer;padding:2px 4px;border-radius:4px;
   }
   .remove-btn:hover{color:var(--red);background:var(--red-dim);}
-  .price-row{display:flex;align-items:baseline;gap:8px;margin-top:6px;flex-wrap:wrap;}
-  .price{font-family:var(--sans);font-weight:700;font-size:22px;}
+  .price{font-family:var(--sans);font-weight:700;font-size:22px;margin-top:6px;}
   .price.signal-up{color:var(--green);}
   .price.signal-down{color:var(--red);}
   .price.signal-mixed{color:var(--amber);}
-  .afterhours{font-family:var(--mono);font-size:12px;color:var(--muted);}
-  .afterhours.up{color:var(--green);}
-  .afterhours.down{color:var(--red);}
   .chg{font-family:var(--mono);font-size:12.5px;margin-top:3px;}
   .chg.up{color:var(--green);}
   .chg.down{color:var(--red);}
@@ -281,7 +277,7 @@ async function loadSharedWatchlist(){
 
 let SYMBOLS = [...DEFAULT_SYMBOLS]; // placeholder until loadSharedWatchlist() resolves in init()
 const REFRESH_MS = 60 * 1000;
-const state = { history: {}, sma: null, afterhours: null, lastPrice: {}, lastPct: {}, secondsLeft: REFRESH_MS/1000 };
+const state = { history: {}, sma: null, lastPrice: {}, lastPct: {}, secondsLeft: REFRESH_MS/1000 };
 
 const grid = document.getElementById('stockGrid');
 const updatedEl = document.getElementById('updated');
@@ -300,10 +296,7 @@ function buildCards(){
           <button class="remove-btn" data-sym="${sym}" title="Remove ${sym}" aria-label="Remove ${sym}">&times;</button>
         </div>
       </div>
-      <div class="price-row">
-        <span class="price" id="price-${sym}">&mdash;</span>
-        <span class="afterhours" id="ah-${sym}"></span>
-      </div>
+      <span class="price" id="price-${sym}">&mdash;</span>
       <div class="chg" id="chg-${sym}">waiting for data</div>
       <svg class="spark" id="spark-${sym}" width="100%" height="30" viewBox="0 0 200 30" preserveAspectRatio="none"></svg>
       <div class="sma" id="sma-${sym}">SMA loading&hellip;</div>
@@ -469,35 +462,6 @@ async function refreshSma(){
   SYMBOLS.forEach(renderSma);
 }
 
-// ---------- After-hours price ----------
-// Cheap to poll often — served from a server-side cache that itself only
-// refreshes every 5 minutes and only during actual pre/post-market hours,
-// so frequent polling here doesn't cost any extra API credits.
-async function refreshAfterhours(){
-  try{
-    const res = await fetch(`/api/afterhours?symbols=${SYMBOLS.join(',')}`);
-    state.afterhours = await res.json();
-  }catch(e){
-    state.afterhours = null;
-  }
-  SYMBOLS.forEach(renderAfterhours);
-}
-
-function renderAfterhours(sym){
-  const el = document.getElementById(`ah-${sym}`);
-  if(!el) return;
-  const a = state.afterhours && state.afterhours[sym];
-  if(!a || !a.ok || !a.active || a.price == null){
-    el.textContent = '';
-    el.className = 'afterhours';
-    return;
-  }
-  const regular = state.lastPrice[sym];
-  const cls = regular != null ? (a.price >= regular ? 'up' : 'down') : '';
-  el.className = `afterhours ${cls}`;
-  el.textContent = `(AH $${a.price.toFixed(2)})`;
-}
-
 function renderSma(sym){
   const el = document.getElementById(`sma-${sym}`);
   const priceEl = document.getElementById(`price-${sym}`);
@@ -650,7 +614,7 @@ function renderMacroValue(elId, entry, formatter){
 // ---------- orchestration ----------
 async function refreshAll(){
   updatedEl.textContent = 'refreshing…';
-  await Promise.all([refreshStocks(), refreshFearGreed(), refreshAfterhours()]);
+  await Promise.all([refreshStocks(), refreshFearGreed()]);
   updatedEl.textContent = `updated ${new Date().toLocaleTimeString()}`;
   state.secondsLeft = REFRESH_MS/1000;
 }
@@ -756,19 +720,7 @@ async function refreshEarnings(){
   }
 }
 
-document.getElementById('refreshBtn').addEventListener('click', async () => {
-  refreshAll();
-  try{
-    const res = await fetch('/api/afterhours/refresh', { method: 'POST' });
-    const data = await res.json();
-    if(data.triggered){
-      // Give the server a moment to actually complete the fetch, then
-      // pull the fresh result in (rather than waiting for the next
-      // regular 60s poll).
-      setTimeout(refreshAfterhours, 3000);
-    }
-  }catch(e){ /* non-fatal — the regular poll cycle will still catch up eventually */ }
-});
+document.getElementById('refreshBtn').addEventListener('click', refreshAll);
 
 function tickCountdown(){
   state.secondsLeft = Math.max(0, state.secondsLeft - 1);

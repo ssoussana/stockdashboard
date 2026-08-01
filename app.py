@@ -28,8 +28,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from datetime import datetime, time as dt_time, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 
@@ -560,177 +559,6 @@ def _sma_background_loop():
 threading.Thread(target=_sma_background_loop, daemon=True).start()
 
 
-# ---------- After-hours price ----------
-# US market extended-hours windows, Eastern time. This is an approximation
-# — it doesn't account for market holidays or early-close days.
-PRE_MARKET_START = dt_time(4, 0)
-PRE_MARKET_END = dt_time(9, 30)
-POST_MARKET_START = dt_time(16, 0)
-POST_MARKET_END = dt_time(20, 0)
-
-AFTERHOURS_CACHE_SECONDS = 15 * 60  # per-user request: 15-minute refresh
-_afterhours_cache = {}  # symbol -> {"data": {...}, "ts": float}
-
-
-def market_session_now():
-    """Returns 'pre', 'post', or 'closed' (which also covers regular market
-    hours — no extended price to show then)."""
-    try:
-        now_et = datetime.now(ZoneInfo("America/New_York"))
-    except Exception as e:
-        print(f"[afterhours] ZoneInfo lookup failed: {e!r} — treating as closed", flush=True)
-        return "closed"
-    if now_et.weekday() >= 5:  # Saturday/Sunday
-        return "closed"
-    t = now_et.time()
-    if PRE_MARKET_START <= t < PRE_MARKET_END:
-        return "pre"
-    if POST_MARKET_START <= t < POST_MARKET_END:
-        return "post"
-    return "closed"
-
-
-def fetch_afterhours_batch(symbols):
-    """One HTTP call per batch (size set by TWELVE_DATA_BATCH_SIZE), using Twelve Data's
-    prepost=true quote option to get the latest extended-hours print
-    alongside the regular session's numbers."""
-    acquire_twelvedata_credits(len(symbols))
-    print(f"[afterhours] requesting batch: {symbols}", flush=True)
-    r = twelvedata_get(
-        "https://api.twelvedata.com/quote",
-        params={
-            "symbol": ",".join(symbols),
-            "prepost": "true",
-            "apikey": TWELVE_DATA_API_KEY,
-        },
-    )
-    print(f"[afterhours] batch {symbols} responded, status {r.status_code}", flush=True)
-    payload = r.json()
-    if len(symbols) == 1 and ("close" in payload or "symbol" in payload):
-        payload = {symbols[0]: payload}
-
-    out = {}
-    for sym in symbols:
-        entry = payload.get(sym)
-        try:
-            if not entry:
-                raise ValueError("symbol missing from batch response")
-            if entry.get("status") == "error":
-                raise ValueError(entry.get("message", "twelve data error"))
-            # A present extended_price is NOT reliable on its own — confirmed
-            # via a live response where extended_price/extended_change/
-            # extended_timestamp were all just an exact echo of the regular
-            # session's close/timestamp (extended_change was "0" and
-            # extended_timestamp == last_quote_at), meaning no real
-            # after-hours trade had actually happened yet. Requiring the
-            # extended timestamp to be strictly newer than the regular
-            # session's last quote is what actually distinguishes a real
-            # print from this kind of placeholder echo.
-            price = entry.get("extended_price")
-            ext_ts = entry.get("extended_timestamp")
-            reg_ts = entry.get("last_quote_at") or entry.get("timestamp")
-            is_real = price is not None and ext_ts is not None and reg_ts is not None and ext_ts > reg_ts
-            if not is_real:
-                out[sym] = {"ok": True, "active": False}
-                continue
-            out[sym] = {"ok": True, "active": True, "price": round(float(price), 2)}
-        except Exception as e:
-            out[sym] = {"ok": False, "error": str(e)}
-    return out
-
-
-_afterhours_wake_event = threading.Event()
-_afterhours_last_forced = 0
-AFTERHOURS_FORCE_COOLDOWN = 30  # seconds — stops rapid button-mashing from burning through rate-limit budget
-
-
-def _afterhours_background_loop():
-    print("[afterhours] background thread started", flush=True)
-    while True:
-        session = market_session_now()
-        if session in ("pre", "post") and TWELVE_DATA_API_KEY:
-            symbols = active_known_symbols()
-            print(f"[afterhours] market session is '{session}', refreshing {len(symbols)} symbols", flush=True)
-            for i in range(0, len(symbols), TWELVE_DATA_BATCH_SIZE):
-                batch = symbols[i:i + TWELVE_DATA_BATCH_SIZE]
-                try:
-                    batch_out = fetch_afterhours_batch(batch)
-                except Exception as e:
-                    print(f"[afterhours] batch {batch} raised: {e!r}", flush=True)
-                    batch_out = {sym: {"ok": False, "error": f"batch request failed: {e}"} for sym in batch}
-                now = time.time()
-                for sym, data in batch_out.items():
-                    _afterhours_cache[sym] = {"data": data, "ts": now}
-            print("[afterhours] pass complete", flush=True)
-        else:
-            print(f"[afterhours] market session is '{session}', skipping", flush=True)
-        _afterhours_wake_event.clear()
-        _afterhours_wake_event.wait(timeout=AFTERHOURS_CACHE_SECONDS)
-
-
-threading.Thread(target=_afterhours_background_loop, daemon=True).start()
-
-
-@app.route("/api/afterhours")
-def afterhours():
-    symbols = parse_symbols_param()
-    register_known_symbols(symbols)
-
-    if not TWELVE_DATA_API_KEY:
-        return jsonify({sym: {"ok": False, "error": "TWELVE_DATA_API_KEY not set"} for sym in symbols})
-
-    out = {}
-    for sym in symbols:
-        entry = _afterhours_cache.get(sym)
-        out[sym] = entry["data"] if entry else {"ok": True, "active": False}
-    return jsonify(out)
-
-
-@app.route("/api/afterhours/refresh", methods=["POST"])
-def afterhours_force_refresh():
-    """Wakes the after-hours background loop immediately instead of waiting
-    out its normal 15-minute cycle. Cooldown-guarded so a user mashing the
-    refresh button can't repeatedly burn through the shared rate-limit
-    budget — extra clicks within the cooldown window are silently no-ops."""
-    global _afterhours_last_forced
-    now = time.time()
-    session = market_session_now()
-    if session not in ("pre", "post"):
-        return jsonify({"triggered": False, "reason": f"market session is '{session}', nothing to refresh"})
-    if now - _afterhours_last_forced < AFTERHOURS_FORCE_COOLDOWN:
-        wait = round(AFTERHOURS_FORCE_COOLDOWN - (now - _afterhours_last_forced), 1)
-        return jsonify({"triggered": False, "reason": f"cooldown active, try again in {wait}s"})
-    _afterhours_last_forced = now
-    _afterhours_wake_event.set()
-    return jsonify({"triggered": True})
-
-
-@app.route("/api/debug/afterhours")
-def afterhours_debug():
-    """Diagnostic snapshot — what the server thinks is happening right
-    now, without having to dig through logs."""
-    now = time.time()
-    cache_ages = {
-        sym: round(now - entry["ts"], 1)
-        for sym, entry in _afterhours_cache.items()
-    }
-    try:
-        now_et = datetime.now(ZoneInfo("America/New_York")).isoformat()
-        tz_error = None
-    except Exception as e:
-        now_et = None
-        tz_error = repr(e)
-    return jsonify({
-        "computed_session": market_session_now(),
-        "server_time_et": now_et,
-        "timezone_error": tz_error,
-        "twelve_data_key_set": bool(TWELVE_DATA_API_KEY),
-        "known_symbols_all_time": sorted(_known_symbols),
-        "known_symbols_active": active_known_symbols(),
-        "afterhours_cache_seconds_old": cache_ages,
-    })
-
-
 # ---------- Market movers (top gainers/losers, whole-market — not tied to
 # the watchlist) ----------
 MOVERS_CACHE_SECONDS = 10 * 60  # FMP free tier: 250 requests/day — keep this gentle
@@ -829,6 +657,8 @@ def movers_debug():
 
 def _movers_background_loop():
     print("[movers] background thread started", flush=True)
+    time.sleep(5)  # staggered so 6 background threads don't all burst-fetch
+                   # simultaneously at boot, competing for this host's 0.5 CPU
     while True:
         if FMP_API_KEY:
             try:
@@ -933,6 +763,7 @@ def macro_debug():
 
 def _macro_background_loop():
     print("[macro] background thread started", flush=True)
+    time.sleep(10)  # staggered — see movers loop comment
     while True:
         if FRED_API_KEY:
             try:
@@ -1050,6 +881,8 @@ def earnings_debug():
 
 def _earnings_background_loop():
     print("[earnings] background thread started", flush=True)
+    time.sleep(15)  # staggered — see movers loop comment. This one's the
+                     # heaviest burst (4 parallel workers), so it goes last.
     while True:
         try:
             fetch_earnings_all(active_known_symbols())
@@ -1166,6 +999,7 @@ def gold_debug():
 
 def _gold_background_loop():
     print("[gold] background thread started", flush=True)
+    time.sleep(20)  # staggered — see movers loop comment
     while True:
         try:
             fetch_gold_all()
