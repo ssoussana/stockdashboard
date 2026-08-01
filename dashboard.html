@@ -140,6 +140,9 @@
   .card.down .bar{background:var(--red);}
   .card .row1{display:flex;justify-content:space-between;align-items:flex-start;}
   .sym{font-family:var(--mono);font-weight:700;font-size:15px;letter-spacing:.02em;}
+  .sym-link{color:inherit;text-decoration:none;}
+  .sym-link:hover{text-decoration:underline;color:var(--amber);}
+  .sym-link:focus-visible{outline:2px solid var(--amber);outline-offset:2px;}
   .row1-right{display:flex;align-items:center;gap:8px;}
   .remove-btn{
     background:none;border:none;color:var(--muted-dim);font-family:var(--mono);
@@ -282,7 +285,7 @@ function buildCards(){
     <div class="card" id="card-${sym}">
       <div class="bar"></div>
       <div class="row1">
-        <span class="sym">${sym}</span>
+        <span class="sym">${symLink(sym)}</span>
         <div class="row1-right">
           <span class="status-pill" id="pill-${sym}"></span>
           <button class="remove-btn" data-sym="${sym}" title="Remove ${sym}" aria-label="Remove ${sym}">&times;</button>
@@ -627,7 +630,7 @@ function renderMoversList(containerId, items, error){
     const up = pct >= 0;
     const pctStr = pct != null ? `${up?'+':''}${pct.toFixed(2)}%` : '&mdash;';
     return `<div class="movers-row">
-      <span><span class="sym">${m.symbol}</span><span class="name">${m.name || ''}</span></span>
+      <span><span class="sym">${symLink(m.symbol)}</span><span class="name">${m.name || ''}</span></span>
       <span class="pct ${up?'up':'down'}">${pctStr}</span>
     </div>`;
   }).join('');
@@ -646,6 +649,10 @@ async function refreshMovers(){
 }
 
 // ---------- Upcoming earnings ----------
+function symLink(sym){
+  return `<a href="https://finance.yahoo.com/quote/${encodeURIComponent(sym)}" target="_blank" rel="noopener noreferrer" class="sym-link">${sym}</a>`;
+}
+
 function fmtRevenue(v){
   if(v == null) return null;
   const abs = Math.abs(v);
@@ -694,7 +701,7 @@ async function refreshEarnings(){
 
         return `<div class="earn-row">
           <div class="movers-row" style="border-bottom:none;padding-bottom:2px;">
-            <span><span class="sym">${sym}</span><span class="name">Reported ${dateStr}</span></span>
+            <span><span class="sym">${symLink(sym)}</span><span class="name">Reported ${dateStr}</span></span>
           </div>
           <div class="earn-stats">${epsChip}${revChip}</div>
         </div>`;
@@ -703,7 +710,7 @@ async function refreshEarnings(){
       const daysAway = Math.round((date - today) / 86400000);
       const when = daysAway === 0 ? 'today' : daysAway === 1 ? 'tomorrow' : `in ${daysAway}d`;
       return `<div class="movers-row">
-        <span><span class="sym">${sym}</span><span class="name">${dateStr}${info.hour && hourLabel[info.hour] ? ' · '+hourLabel[info.hour] : ''}</span></span>
+        <span><span class="sym">${symLink(sym)}</span><span class="name">${dateStr}${info.hour && hourLabel[info.hour] ? ' · '+hourLabel[info.hour] : ''}</span></span>
         <span class="pct">${when}</span>
       </div>`;
     }).join('');
