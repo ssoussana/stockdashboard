@@ -51,6 +51,10 @@ FMP_API_KEY = os.environ.get("FMP_API_KEY")
 # Optional — only needed for real crude oil/treasury-yield data.
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 
+# Optional — only needed for a real Nasdaq Composite index value. Falls
+# back to the ONEQ ETF proxy automatically if not set or if it fails.
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
+
 DEFAULT_SYMBOLS = ["PLTR", "NVDA", "CLS", "NBIS", "HOOD", "SPY", "QQQ",
                     "GLW", "CRDO", "COHR", "SOXL", "DRAM", "IREN"]
 
@@ -1244,6 +1248,123 @@ def finnhub_quote_test_debug():
         timeout=(5, 15),
     )
     return jsonify(r.json())
+
+
+# ---------- Nasdaq Composite: real index attempt, with ONEQ fallback ----------
+NASDAQ_CACHE_SECONDS = 5 * 60  # conservative — this vendor's rate limits are unknown
+_nasdaq_cache = {"data": None, "ts": 0}
+_nasdaq_status = {"last_attempt": None, "last_error": None}
+
+
+def fetch_nasdaq_real_index():
+    """Real Nasdaq Composite via a RapidAPI Yahoo Finance wrapper — the only
+    endpoint format confirmed from their docs is "STOCK History" (POST),
+    so this pulls a short history and treats the most recent two points as
+    the current value and prior close. Response shape isn't documented
+    anywhere accessible, so this checks a few plausible variants."""
+    r = _http.post(
+        "https://yahoo-finance160.p.rapidapi.com/history",
+        headers={
+            "Content-Type": "application/json",
+            "x-rapidapi-host": "yahoo-finance160.p.rapidapi.com",
+            "x-rapidapi-key": RAPIDAPI_KEY,
+        },
+        json={"stock": "^IXIC", "period": "5d"},
+        timeout=(5, 15),
+    )
+    r.raise_for_status()
+    payload = r.json()
+    rows = payload if isinstance(payload, list) else (
+        payload.get("data") or payload.get("history") or payload.get("result")
+    )
+    if not isinstance(rows, list) or len(rows) < 2:
+        raise ValueError(f"unexpected or insufficient response shape: {str(payload)[:200]}")
+
+    def get_close(row):
+        for key in ("close", "Close", "adjClose", "Adj Close"):
+            if row.get(key) is not None:
+                return float(row[key])
+        raise ValueError(f"no close field in row: {str(row)[:100]}")
+
+    latest = get_close(rows[-1])
+    prev = get_close(rows[-2])
+    return {
+        "ok": True,
+        "value": round(latest, 2),
+        "change": round(latest - prev, 2),
+        "percent_change": round((latest - prev) / prev * 100, 2) if prev else None,
+    }
+
+
+def fetch_nasdaq_via_oneq():
+    """Fallback — the ONEQ ETF via Finnhub, same source already used
+    elsewhere in the app."""
+    r = _http.get(
+        "https://finnhub.io/api/v1/quote",
+        params={"symbol": "ONEQ", "token": API_KEY},
+        timeout=(5, 15),
+    )
+    r.raise_for_status()
+    q = r.json()
+    if q.get("c") is None or q.get("c") == 0:
+        raise ValueError("ONEQ quote unavailable")
+    return {"ok": True, "value": q["c"], "change": q.get("d"), "percent_change": q.get("dp"), "via": "ONEQ (proxy)"}
+
+
+def fetch_nasdaq_all():
+    _nasdaq_status["last_attempt"] = time.time()
+    result = None
+    if RAPIDAPI_KEY:
+        try:
+            result = fetch_nasdaq_real_index()
+            result["via"] = "real index"
+            _nasdaq_status["last_error"] = None
+        except Exception as e:
+            print(f"[nasdaq] real index attempt failed, falling back to ONEQ: {e!r}", flush=True)
+            _nasdaq_status["last_error"] = str(e)
+    if result is None:
+        try:
+            result = fetch_nasdaq_via_oneq()
+        except Exception as e:
+            print(f"[nasdaq] ONEQ fallback also failed: {e!r}", flush=True)
+            result = {"ok": False, "error": str(e)}
+            if _nasdaq_status["last_error"] is None:
+                _nasdaq_status["last_error"] = str(e)
+    _nasdaq_cache["data"] = result
+    _nasdaq_cache["ts"] = time.time()
+    print(f"[nasdaq] updated: {result}", flush=True)
+
+
+@app.route("/api/nasdaq")
+def nasdaq():
+    if _nasdaq_cache["data"] is None:
+        return jsonify({"ok": False, "error": "not fetched yet"})
+    return jsonify(_nasdaq_cache["data"])
+
+
+@app.route("/api/debug/nasdaq")
+def nasdaq_debug():
+    return jsonify({
+        "rapidapi_key_set": bool(RAPIDAPI_KEY),
+        "cache_seconds_old": round(time.time() - _nasdaq_cache["ts"], 1) if _nasdaq_cache["data"] else None,
+        "cached_data": _nasdaq_cache["data"],
+        "last_attempt_seconds_ago": round(time.time() - _nasdaq_status["last_attempt"], 1) if _nasdaq_status["last_attempt"] else None,
+        "last_error": _nasdaq_status["last_error"],
+    })
+
+
+def _nasdaq_background_loop():
+    print("[nasdaq] background thread started", flush=True)
+    time.sleep(8)  # staggered
+    while True:
+        try:
+            fetch_nasdaq_all()
+        except Exception as e:
+            print(f"[nasdaq] fetch_nasdaq_all raised: {e!r}", flush=True)
+        time.sleep(NASDAQ_CACHE_SECONDS)
+
+
+threading.Thread(target=_nasdaq_background_loop, daemon=True).start()
 
 
 if __name__ == "__main__":

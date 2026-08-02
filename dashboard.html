@@ -543,9 +543,9 @@ let _nasdaqQuote = null;
 
 async function refreshNasdaqProxy(){
   try{
-    const res = await fetch('/api/quotes?symbols=ONEQ');
+    const res = await fetch('/api/nasdaq');
     const data = await res.json();
-    _nasdaqQuote = data.ONEQ;
+    _nasdaqQuote = data.ok ? { ok: true, c: data.value, d: data.change, dp: data.percent_change, via: data.via } : null;
   }catch(e){
     _nasdaqQuote = null;
   }
@@ -572,9 +572,14 @@ function renderIndexStrip(market){
       return `<span class="idx"><span class="name">NASDAQ</span> <span class="val">&mdash;</span></span>`;
     }
     const up = _nasdaqQuote.d >= 0;
-    return `<span class="idx" title="${asOf} \u2014 via ONEQ (Fidelity Nasdaq Composite Index Fund)">
+    const isReal = _nasdaqQuote.via === 'real index';
+    const valStr = isReal
+      ? _nasdaqQuote.c.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})
+      : `$${_nasdaqQuote.c.toFixed(2)}`;
+    const tip = isReal ? `${asOf} \u2014 real Nasdaq Composite index` : `${asOf} \u2014 via ONEQ (Fidelity Nasdaq Composite Index Fund proxy)`;
+    return `<span class="idx" title="${tip}">
       <span class="name">NASDAQ</span>
-      <span class="val">$${_nasdaqQuote.c.toFixed(2)}</span>
+      <span class="val">${valStr}</span>
       <span class="chg ${up?'up':'down'}">${up?'+':''}${_nasdaqQuote.dp.toFixed(2)}%</span>
     </span>`;
   }
