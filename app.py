@@ -1087,26 +1087,38 @@ def next_fomc_meeting():
     return upcoming[0] if upcoming else None
 
 
+_fed_status = {"last_attempt": None, "last_error": None}
+
+
 def fetch_fed_calendar():
+    _fed_status["last_attempt"] = time.time()
     print("[fed] requesting next CPI/PPI release dates", flush=True)
-    out = {}
-    for key, release_id in FRED_RELEASE_IDS.items():
-        try:
-            out[key] = {"ok": True, "next_date": fetch_next_fred_release(release_id)}
-        except Exception as e:
-            print(f"[fed] {key} failed: {e!r}", flush=True)
-            out[key] = {"ok": False, "error": str(e)}
+    try:
+        out = {}
+        for key, release_id in FRED_RELEASE_IDS.items():
+            try:
+                out[key] = {"ok": True, "next_date": fetch_next_fred_release(release_id)}
+            except Exception as e:
+                print(f"[fed] {key} failed: {e!r}", flush=True)
+                out[key] = {"ok": False, "error": str(e)}
 
-    meeting = next_fomc_meeting()
-    if meeting:
-        out["fomc"] = {"ok": True, "start": meeting["start"], "end": meeting["end"]}
-    else:
-        out["fomc"] = {"ok": False, "error": "no meeting found in the maintained schedule — needs updating"}
+        meeting = next_fomc_meeting()
+        if meeting:
+            out["fomc"] = {"ok": True, "start": meeting["start"], "end": meeting["end"]}
+        else:
+            out["fomc"] = {"ok": False, "error": "no meeting found in the maintained schedule — needs updating"}
 
-    _fed_cache["data"] = out
-    _fed_cache["ts"] = time.time()
-    save_json_cache("fed_cache.json", _fed_cache)
-    print(f"[fed] updated: {out}", flush=True)
+        _fed_cache["data"] = out
+        _fed_cache["ts"] = time.time()
+        save_json_cache("fed_cache.json", _fed_cache)
+        _fed_status["last_error"] = None
+        print(f"[fed] updated: {out}", flush=True)
+    except Exception as e:
+        # Catches anything OUTSIDE the per-key loop, so a whole-batch
+        # failure is visible too, not just per-key ones.
+        _fed_status["last_error"] = f"whole-batch failure: {e!r}"
+        print(f"[fed] fetch_fed_calendar whole-batch failure: {e!r}", flush=True)
+        raise
 
 
 @app.route("/api/fed-calendar")
@@ -1129,6 +1141,8 @@ def fed_calendar_debug():
         "release_ids": FRED_RELEASE_IDS,
         "cache_seconds_old": round(time.time() - _fed_cache["ts"], 1) if _fed_cache.get("data") else None,
         "cached_data": _fed_cache.get("data"),
+        "last_attempt_seconds_ago": round(time.time() - _fed_status["last_attempt"], 1) if _fed_status["last_attempt"] else None,
+        "last_error": _fed_status["last_error"],
         "next_fomc_from_schedule": next_fomc_meeting(),
         "fomc_schedule_last_entry": FOMC_MEETINGS[-1] if FOMC_MEETINGS else None,
     })
