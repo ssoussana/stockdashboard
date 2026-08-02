@@ -51,6 +51,9 @@ FMP_API_KEY = os.environ.get("FMP_API_KEY")
 # Optional — only needed for real crude oil/treasury-yield data.
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 
+# Optional — only needed for the Last CPI/PPI actual-vs-estimate comparison.
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
+
 DEFAULT_SYMBOLS = ["PLTR", "NVDA", "CLS", "NBIS", "HOOD", "SPY", "QQQ",
                     "GLW", "CRDO", "COHR", "SOXL", "DRAM", "IREN"]
 
@@ -1083,63 +1086,69 @@ def fetch_next_fred_release(release_id):
 
 def fetch_last_cpi_ppi():
     """Most recent REPORTED (not scheduled) Core CPI/Core PPI, with the
-    actual value and the consensus estimate it was measured against — via
-    FMP's economic calendar. Uses the SAME FMP key already working for
-    movers, no new signup. Core (excludes food/energy) rather than
-    headline, since Core is the more policy-relevant number the Fed
-    actually weighs more heavily. FMP's exact field names for this specific
-    endpoint aren't confirmed from documentation alone, so this checks a
-    couple of likely variants and surfaces the raw shape in errors if
-    parsing fails, rather than assuming and failing silently."""
-    today = datetime.now().date()
-    r = _http.get(
-        "https://financialmodelingprep.com/stable/economic-calendar",
-        params={
-            "from": (today - timedelta(days=35)).isoformat(),
-            "to": today.isoformat(),
-            "apikey": FMP_API_KEY,
+    actual value and the consensus estimate — via RapidAPI's "Trader
+    Calendar" API (by mpeng). This is a POST endpoint with the country in
+    the JSON body, unlike the GET-based one tried earlier. The exact
+    response schema isn't documented anywhere accessible, so this checks
+    several plausible field-name variants and surfaces the raw response
+    shape in errors if none match, rather than guessing silently."""
+    r = _http.post(
+        "https://trader-calendar.p.rapidapi.com/api/calendar",
+        headers={
+            "Content-Type": "application/json",
+            "x-rapidapi-host": "trader-calendar.p.rapidapi.com",
+            "x-rapidapi-key": RAPIDAPI_KEY,
         },
+        json={"country": "USA"},
         timeout=(5, 15),
     )
     r.raise_for_status()
-    events = r.json()
+    payload = r.json()
+    events = payload if isinstance(payload, list) else (
+        payload.get("data") or payload.get("events") or payload.get("calendar") or payload.get("result")
+    )
     if not isinstance(events, list):
-        raise ValueError(f"unexpected response shape (not a list): {str(events)[:150]}")
+        raise ValueError(f"unexpected response shape: {str(payload)[:200]}")
 
-    def get_actual(e):
-        return e.get("actual")
+    def get_field(e, *names):
+        for n in names:
+            if e.get(n) is not None:
+                return e.get(n)
+        return None
 
-    def get_estimate(e):
-        return e.get("estimate", e.get("consensus"))
+    def parse_number(v):
+        if v is None:
+            return None
+        s = str(v).strip().rstrip("%")
+        try:
+            return float(s)
+        except ValueError:
+            return None
 
-    def get_name(e):
-        return e.get("event", e.get("name", ""))
+    def name_of(e):
+        return get_field(e, "event", "name", "title", "indicator") or ""
 
-    def get_country(e):
-        return e.get("country", "")
-
-    def get_time(e):
-        return e.get("date", e.get("time", ""))
+    def time_of(e):
+        return get_field(e, "date", "dateUtc", "time", "datetime") or ""
 
     def find_latest(keyword):
         matches = [
             e for e in events
-            if get_country(e) in ("US", "USA", "United States")
-            and keyword.lower() in (get_name(e) or "").lower()
-            and get_actual(e) is not None
+            if str(get_field(e, "country", "countryCode", "country_code") or "").upper() in ("US", "USA", "UNITED STATES")
+            and keyword.lower() in name_of(e).lower()
+            and get_field(e, "actual", "Actual") is not None
         ]
         if not matches:
             return None
-        # Headline CPI/PPI usually releases at the same moment as the "Core"
-        # variant — prefer the headline one (name doesn't contain "core")
-        # when both exist, rather than picking whichever happens to sort
-        # last among identical timestamps.
-        # Prefer the "Core" variant (excludes food/energy) over headline —
-        # falls back to headline only if no Core version was reported.
-        core_only = [e for e in matches if "core" in (get_name(e) or "").lower()]
+        core_only = [e for e in matches if "core" in name_of(e).lower()]
         pool = core_only or matches
-        best = sorted(pool, key=get_time)[-1]
-        return {"event": get_name(best), "time": get_time(best), "actual": get_actual(best), "estimate": get_estimate(best)}
+        best = sorted(pool, key=time_of)[-1]
+        return {
+            "event": name_of(best),
+            "time": time_of(best),
+            "actual": parse_number(get_field(best, "actual", "Actual")),
+            "estimate": parse_number(get_field(best, "estimate", "consensus", "forecast", "Forecast")),
+        }
 
     return find_latest("CPI"), find_latest("PPI")
 
@@ -1172,19 +1181,19 @@ def fetch_fed_calendar():
             out["fomc"] = {"ok": False, "error": "no meeting found in the maintained schedule — needs updating"}
 
         try:
+            if not RAPIDAPI_KEY:
+                raise ValueError("RAPIDAPI_KEY not set")
             cpi_event, ppi_event = fetch_last_cpi_ppi()
             for key, event in (("cpi_last", cpi_event), ("ppi_last", ppi_event)):
                 if event is None:
                     out[key] = {"ok": False, "error": "no recent reported value found"}
                     continue
-                actual = event.get("actual")
-                estimate = event.get("estimate")
                 out[key] = {
                     "ok": True,
                     "event_name": event.get("event"),
                     "date": (event.get("time") or "")[:10] or None,
-                    "actual": actual,
-                    "estimate": estimate,
+                    "actual": event.get("actual"),
+                    "estimate": event.get("estimate"),
                 }
         except Exception as e:
             print(f"[fed] last CPI/PPI actual-vs-estimate failed: {e!r}", flush=True)
@@ -1213,7 +1222,7 @@ def fed_calendar():
             "fomc": {"ok": True, **(next_fomc_meeting() or {"start": None, "end": None})},
         })
     if _fed_cache.get("data") is None:
-        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "fomc", "cpi_last", "ppi_last")})
+        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "fomc")})
     return jsonify(_fed_cache["data"])
 
 
