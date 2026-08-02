@@ -1229,6 +1229,23 @@ def twelvedata_quote_test_debug():
     return jsonify(r.json())
 
 
+@app.route("/api/debug/finnhub-quote-test")
+def finnhub_quote_test_debug():
+    """Test any candidate symbol format directly against Finnhub's real
+    /quote endpoint (e.g. ?symbol=.IXIC) — Finnhub is the primary quote
+    provider already used everywhere else, so worth checking directly
+    rather than assuming from one earlier ^VIX test."""
+    symbol = request.args.get("symbol", "")
+    if not symbol:
+        return jsonify({"error": "pass a ?symbol=... to test, e.g. ?symbol=.IXIC"})
+    r = _http.get(
+        "https://finnhub.io/api/v1/quote",
+        params={"symbol": symbol, "token": API_KEY},
+        timeout=(5, 15),
+    )
+    return jsonify(r.json())
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"Default watchlist: {', '.join(DEFAULT_SYMBOLS)}")
