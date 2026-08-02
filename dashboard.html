@@ -88,20 +88,20 @@
   /* Market movers */
   .movers-col{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;}
   .movers-col h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;font-family:var(--mono);font-weight:600;}
-  .movers-empty{font-family:var(--mono);font-size:12px;color:var(--muted-dim);padding:6px 0;}
+  .movers-empty{font-family:var(--mono);font-size:12px;color:var(--muted);padding:6px 0;}
   .movers-row{
     display:flex;justify-content:space-between;align-items:center;
     padding:7px 0;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:12.5px;
   }
   .movers-row:last-child{border-bottom:none;}
   .movers-row .sym{font-weight:700;color:var(--text);}
-  .movers-row .name{color:var(--muted-dim);font-size:11px;margin-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px;display:inline-block;vertical-align:bottom;}
+  .movers-row .name{color:var(--muted);font-size:12px;margin-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px;display:inline-block;vertical-align:bottom;}
   .movers-row .pct{font-weight:600;}
   .movers-row .pct.up{color:var(--green);}
   .movers-row .pct.down{color:var(--red);}
   .earn-row{padding:4px 0;border-bottom:1px solid var(--border);}
   .earn-row:last-child{border-bottom:none;}
-  .earn-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:11px;color:var(--muted);padding-bottom:4px;}
+  .earn-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:12px;color:var(--muted);padding-bottom:4px;}
   #earningsList{max-height:225px;overflow-y:auto;}
   .earn-stats .up{color:var(--green);}
   .earn-stats .down{color:var(--red);}
@@ -680,35 +680,54 @@ async function refreshFedCalendar(){
     const data = await res.json();
     const today = new Date(); today.setHours(0,0,0,0);
 
-    const rows = [];
+    const html = [];
 
-    if(data.cpi && data.cpi.ok && data.cpi.next_date){
-      const d = new Date(data.cpi.next_date + 'T00:00:00');
-      rows.push({ label: 'Next CPI', dateStr: d.toLocaleDateString(undefined,{month:'short',day:'numeric'}), when: daysAwayLabel(d, today) });
+    function lastRow(label, info){
+      if(!info || !info.ok || info.actual == null) return '';
+      const dateStr = info.date ? new Date(info.date+'T00:00:00').toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '';
+      let chip = `<span class="stat">${info.actual}%</span>`;
+      if(info.estimate != null){
+        // Lower than expected = favorable for inflation data = green;
+        // higher than expected = red.
+        const diff = info.actual - info.estimate;
+        const cls = diff < 0 ? 'up' : (diff > 0 ? 'down' : '');
+        chip = `<span class="stat ${cls}">${info.actual}% vs ${info.estimate}% est</span>`;
+      }
+      return `<div class="earn-row">
+        <div class="movers-row" style="border-bottom:none;padding-bottom:2px;">
+          <span><span class="sym">${label}</span><span class="name">${dateStr}</span></span>
+        </div>
+        <div class="earn-stats">${chip}</div>
+      </div>`;
     }
-    if(data.ppi && data.ppi.ok && data.ppi.next_date){
-      const d = new Date(data.ppi.next_date + 'T00:00:00');
-      rows.push({ label: 'Next PPI', dateStr: d.toLocaleDateString(undefined,{month:'short',day:'numeric'}), when: daysAwayLabel(d, today) });
+
+    function nextRow(label, dateVal){
+      if(!dateVal) return '';
+      const d = new Date(dateVal + 'T00:00:00');
+      return `<div class="movers-row">
+        <span><span class="sym">${label}</span><span class="name">${d.toLocaleDateString(undefined,{month:'short',day:'numeric'})}</span></span>
+        <span class="pct">${daysAwayLabel(d, today)}</span>
+      </div>`;
     }
+
+    html.push(lastRow('Last Core CPI', data.cpi_last));
+    html.push(nextRow('Next CPI', data.cpi && data.cpi.ok ? data.cpi.next_date : null));
+    html.push(lastRow('Last Core PPI', data.ppi_last));
+    html.push(nextRow('Next PPI', data.ppi && data.ppi.ok ? data.ppi.next_date : null));
+
     if(data.fomc && data.fomc.ok && data.fomc.start){
       const dStart = new Date(data.fomc.start + 'T00:00:00');
       const dEnd = data.fomc.end ? new Date(data.fomc.end + 'T00:00:00') : dStart;
       const startStr = dStart.toLocaleDateString(undefined,{month:'short',day:'numeric'});
       const endStr = dEnd.toLocaleDateString(undefined,{day:'numeric'});
-      rows.push({ label: 'Next FOMC', dateStr: `${startStr}\u2013${endStr}`, when: daysAwayLabel(dStart, today) });
+      html.push(`<div class="movers-row">
+        <span><span class="sym">Next FOMC</span><span class="name">${startStr}\u2013${endStr}</span></span>
+        <span class="pct">${daysAwayLabel(dStart, today)}</span>
+      </div>`);
     }
 
-    if(!rows.length){
-      el.innerHTML = `<div class="movers-empty">${(data.cpi && data.cpi.error) || 'unavailable'}</div>`;
-      return;
-    }
-
-    el.innerHTML = rows.map(r => `
-      <div class="movers-row">
-        <span><span class="sym">${r.label}</span><span class="name">${r.dateStr}</span></span>
-        <span class="pct">${r.when}</span>
-      </div>
-    `).join('');
+    const content = html.filter(Boolean).join('');
+    el.innerHTML = content || `<div class="movers-empty">${(data.cpi && data.cpi.error) || 'unavailable'}</div>`;
   }catch(e){
     el.innerHTML = `<div class="movers-empty">unavailable</div>`;
   }

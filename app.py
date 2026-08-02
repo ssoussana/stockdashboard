@@ -1081,6 +1081,48 @@ def fetch_next_fred_release(release_id):
     return dates[0]["date"]
 
 
+def fetch_last_cpi_ppi():
+    """Most recent REPORTED (not scheduled) CPI/PPI, with the actual value
+    and the consensus estimate it was measured against — via Finnhub's
+    economic calendar (same key used elsewhere, no new signup). Free-tier
+    access to this specific endpoint isn't fully confirmed in advance, so
+    errors here are surfaced directly rather than assumed away."""
+    today = datetime.now().date()
+    r = _http.get(
+        "https://finnhub.io/api/v1/calendar/economic",
+        params={
+            "from": (today - timedelta(days=35)).isoformat(),
+            "to": today.isoformat(),
+            "token": API_KEY,
+        },
+        timeout=(5, 15),
+    )
+    r.raise_for_status()
+    payload = r.json()
+    events = payload.get("economicCalendar")
+    if events is None:
+        raise ValueError(f"unexpected response shape, no economicCalendar key: {str(payload)[:150]}")
+
+    def find_latest(keyword):
+        matches = [
+            e for e in events
+            if e.get("country") == "US"
+            and keyword.lower() in (e.get("event") or "").lower()
+            and e.get("actual") is not None
+        ]
+        if not matches:
+            return None
+        # Headline CPI/PPI usually releases at the same moment as the "Core"
+        # variant — prefer the headline one (name doesn't contain "core")
+        # when both exist, rather than picking whichever happens to sort
+        # last among identical timestamps.
+        non_core = [e for e in matches if "core" not in (e.get("event") or "").lower()]
+        pool = non_core or matches
+        return sorted(pool, key=lambda e: e.get("time", ""))[-1]
+
+    return find_latest("CPI"), find_latest("PPI")
+
+
 def next_fomc_meeting():
     today = datetime.now().date().isoformat()
     upcoming = [m for m in FOMC_MEETINGS if m["end"] >= today]
@@ -1108,6 +1150,26 @@ def fetch_fed_calendar():
         else:
             out["fomc"] = {"ok": False, "error": "no meeting found in the maintained schedule — needs updating"}
 
+        try:
+            cpi_event, ppi_event = fetch_last_cpi_ppi()
+            for key, event in (("cpi_last", cpi_event), ("ppi_last", ppi_event)):
+                if event is None:
+                    out[key] = {"ok": False, "error": "no recent reported value found"}
+                    continue
+                actual = event.get("actual")
+                estimate = event.get("estimate")
+                out[key] = {
+                    "ok": True,
+                    "event_name": event.get("event"),
+                    "date": (event.get("time") or "")[:10] or None,
+                    "actual": actual,
+                    "estimate": estimate,
+                }
+        except Exception as e:
+            print(f"[fed] last CPI/PPI actual-vs-estimate failed: {e!r}", flush=True)
+            out["cpi_last"] = {"ok": False, "error": str(e)}
+            out["ppi_last"] = {"ok": False, "error": str(e)}
+
         _fed_cache["data"] = out
         _fed_cache["ts"] = time.time()
         save_json_cache("fed_cache.json", _fed_cache)
@@ -1130,7 +1192,7 @@ def fed_calendar():
             "fomc": {"ok": True, **(next_fomc_meeting() or {"start": None, "end": None})},
         })
     if _fed_cache.get("data") is None:
-        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "fomc")})
+        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "fomc", "cpi_last", "ppi_last")})
     return jsonify(_fed_cache["data"])
 
 
