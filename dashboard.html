@@ -103,6 +103,7 @@
   .earn-row:last-child{border-bottom:none;}
   .earn-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:12px;color:var(--muted);padding-bottom:4px;}
   #earningsList{max-height:225px;overflow-y:auto;}
+  #fedCalendarList{max-height:225px;overflow-y:auto;}
   .earn-stats .up{color:var(--green);}
   .earn-stats .down{color:var(--red);}
 
@@ -682,17 +683,17 @@ async function refreshFedCalendar(){
 
     const html = [];
 
-    function lastRow(label, info){
-      if(!info || !info.ok || info.actual == null) return '';
+    function formatLastValue(info){
+      const sign = info.value >= 0 ? '+' : '';
+      if(info.unit === '%') return `${sign}${info.value}%`;
+      return `${sign}${info.value}K jobs`;
+    }
+
+    function lastRow(label, info, colorBySign){
+      if(!info || !info.ok || info.value == null) return '';
       const dateStr = info.date ? new Date(info.date+'T00:00:00').toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '';
-      let chip = `<span class="stat">${info.actual}%</span>`;
-      if(info.estimate != null){
-        // Lower than expected = favorable for inflation data = green;
-        // higher than expected = red.
-        const diff = info.actual - info.estimate;
-        const cls = diff < 0 ? 'up' : (diff > 0 ? 'down' : '');
-        chip = `<span class="stat ${cls}">${info.actual}% vs ${info.estimate}% est</span>`;
-      }
+      const cls = colorBySign ? (info.value > 0 ? 'up' : (info.value < 0 ? 'down' : '')) : '';
+      const chip = `<span class="stat ${cls}">${formatLastValue(info)}</span>`;
       return `<div class="earn-row">
         <div class="movers-row" style="border-bottom:none;padding-bottom:2px;">
           <span><span class="sym">${label}</span><span class="name">${dateStr}</span></span>
@@ -710,10 +711,16 @@ async function refreshFedCalendar(){
       </div>`;
     }
 
-    html.push(lastRow('Last Core CPI', data.cpi_last));
+    // CPI/PPI shown neutral — a month-over-month change alone isn't
+    // inherently "good" or "bad" without a benchmark to compare against.
+    html.push(lastRow('Last Core CPI', data.cpi_last, false));
     html.push(nextRow('Next CPI', data.cpi && data.cpi.ok ? data.cpi.next_date : null));
-    html.push(lastRow('Last Core PPI', data.ppi_last));
+    html.push(lastRow('Last Core PPI', data.ppi_last, false));
     html.push(nextRow('Next PPI', data.ppi && data.ppi.ok ? data.ppi.next_date : null));
+    // Jobs colored by sign — more jobs added is unambiguously favorable,
+    // no benchmark needed for that read.
+    html.push(lastRow('Last Jobs Report', data.jobs_last, true));
+    html.push(nextRow('Next Jobs Report', data.jobs && data.jobs.ok ? data.jobs.next_date : null));
 
     if(data.fomc && data.fomc.ok && data.fomc.start){
       const dStart = new Date(data.fomc.start + 'T00:00:00');

@@ -51,9 +51,6 @@ FMP_API_KEY = os.environ.get("FMP_API_KEY")
 # Optional — only needed for real crude oil/treasury-yield data.
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 
-# Optional — only needed for the Last CPI/PPI actual-vs-estimate comparison.
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
-
 DEFAULT_SYMBOLS = ["PLTR", "NVDA", "CLS", "NBIS", "HOOD", "SPY", "QQQ",
                     "GLW", "CRDO", "COHR", "SOXL", "DRAM", "IREN"]
 
@@ -1032,7 +1029,8 @@ FED_CACHE_SECONDS = 24 * 60 * 60  # these schedules don't change intraday
 _fed_cache = load_json_cache("fed_cache.json")
 
 # FRED release IDs (fixed, don't change): CPI = 10, PPI = 46.
-FRED_RELEASE_IDS = {"cpi": 10, "ppi": 46}
+FRED_RELEASE_IDS = {"cpi": 10, "ppi": 46, "jobs": 50}  # Employment Situation = 50
+FRED_LAST_VALUE_SERIES = {"cpi_last": "CPILFESL", "ppi_last": "PPICOR", "jobs_last": "PAYEMS"}
 
 # FOMC meeting dates aren't a "data release" FRED tracks, so this is a
 # maintained schedule instead — sourced from the Federal Reserve's own
@@ -1084,75 +1082,6 @@ def fetch_next_fred_release(release_id):
     return dates[0]["date"]
 
 
-def fetch_last_cpi_ppi():
-    """Most recent REPORTED (not scheduled) Core CPI/Core PPI, with the
-    actual value and the consensus estimate — via RapidAPI's "Trader
-    Calendar" API (by mpeng). This is a POST endpoint with the country in
-    the JSON body, unlike the GET-based one tried earlier. The exact
-    response schema isn't documented anywhere accessible, so this checks
-    several plausible field-name variants and surfaces the raw response
-    shape in errors if none match, rather than guessing silently."""
-    r = _http.post(
-        "https://trader-calendar.p.rapidapi.com/api/calendar",
-        headers={
-            "Content-Type": "application/json",
-            "x-rapidapi-host": "trader-calendar.p.rapidapi.com",
-            "x-rapidapi-key": RAPIDAPI_KEY,
-        },
-        json={"country": "USA"},
-        timeout=(5, 15),
-    )
-    r.raise_for_status()
-    payload = r.json()
-    events = payload if isinstance(payload, list) else (
-        payload.get("data") or payload.get("events") or payload.get("calendar") or payload.get("result")
-    )
-    if not isinstance(events, list):
-        raise ValueError(f"unexpected response shape: {str(payload)[:200]}")
-
-    def get_field(e, *names):
-        for n in names:
-            if e.get(n) is not None:
-                return e.get(n)
-        return None
-
-    def parse_number(v):
-        if v is None:
-            return None
-        s = str(v).strip().rstrip("%")
-        try:
-            return float(s)
-        except ValueError:
-            return None
-
-    def name_of(e):
-        return get_field(e, "event", "name", "title", "indicator") or ""
-
-    def time_of(e):
-        return get_field(e, "date", "dateUtc", "time", "datetime") or ""
-
-    def find_latest(keyword):
-        matches = [
-            e for e in events
-            if str(get_field(e, "country", "countryCode", "country_code") or "").upper() in ("US", "USA", "UNITED STATES")
-            and keyword.lower() in name_of(e).lower()
-            and get_field(e, "actual", "Actual") is not None
-        ]
-        if not matches:
-            return None
-        core_only = [e for e in matches if "core" in name_of(e).lower()]
-        pool = core_only or matches
-        best = sorted(pool, key=time_of)[-1]
-        return {
-            "event": name_of(best),
-            "time": time_of(best),
-            "actual": parse_number(get_field(best, "actual", "Actual")),
-            "estimate": parse_number(get_field(best, "estimate", "consensus", "forecast", "Forecast")),
-        }
-
-    return find_latest("CPI"), find_latest("PPI")
-
-
 def next_fomc_meeting():
     today = datetime.now().date().isoformat()
     upcoming = [m for m in FOMC_MEETINGS if m["end"] >= today]
@@ -1180,25 +1109,22 @@ def fetch_fed_calendar():
         else:
             out["fomc"] = {"ok": False, "error": "no meeting found in the maintained schedule — needs updating"}
 
-        try:
-            if not RAPIDAPI_KEY:
-                raise ValueError("RAPIDAPI_KEY not set")
-            cpi_event, ppi_event = fetch_last_cpi_ppi()
-            for key, event in (("cpi_last", cpi_event), ("ppi_last", ppi_event)):
-                if event is None:
-                    out[key] = {"ok": False, "error": "no recent reported value found"}
-                    continue
-                out[key] = {
-                    "ok": True,
-                    "event_name": event.get("event"),
-                    "date": (event.get("time") or "")[:10] or None,
-                    "actual": event.get("actual"),
-                    "estimate": event.get("estimate"),
-                }
-        except Exception as e:
-            print(f"[fed] last CPI/PPI actual-vs-estimate failed: {e!r}", flush=True)
-            out["cpi_last"] = {"ok": False, "error": str(e)}
-            out["ppi_last"] = {"ok": False, "error": str(e)}
+        for key, series_id in FRED_LAST_VALUE_SERIES.items():
+            try:
+                r = fetch_fred_series(series_id)
+                if key == "jobs_last":
+                    # PAYEMS is already in thousands of persons, so the raw
+                    # month-over-month change IS the standard "+150K jobs"
+                    # headline figure — no unit conversion needed.
+                    value = round(r["change"], 1) if r["change"] is not None else None
+                    unit = "K jobs"
+                else:
+                    value = round(r["percent_change"], 2) if r["percent_change"] is not None else None
+                    unit = "%"
+                out[key] = {"ok": True, "value": value, "unit": unit, "date": r["date"]}
+            except Exception as e:
+                print(f"[fed] {key} ({series_id}) failed: {e!r}", flush=True)
+                out[key] = {"ok": False, "error": str(e)}
 
         _fed_cache["data"] = out
         _fed_cache["ts"] = time.time()
@@ -1222,7 +1148,7 @@ def fed_calendar():
             "fomc": {"ok": True, **(next_fomc_meeting() or {"start": None, "end": None})},
         })
     if _fed_cache.get("data") is None:
-        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "fomc")})
+        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "jobs", "fomc", "cpi_last", "ppi_last", "jobs_last")})
     return jsonify(_fed_cache["data"])
 
 
@@ -1230,8 +1156,8 @@ def fed_calendar():
 def fed_calendar_debug():
     return jsonify({
         "fred_key_set": bool(FRED_API_KEY),
-        "fmp_key_set": bool(FMP_API_KEY),
         "release_ids": FRED_RELEASE_IDS,
+        "last_value_series": FRED_LAST_VALUE_SERIES,
         "cache_seconds_old": round(time.time() - _fed_cache["ts"], 1) if _fed_cache.get("data") else None,
         "cached_data": _fed_cache.get("data"),
         "last_attempt_seconds_ago": round(time.time() - _fed_status["last_attempt"], 1) if _fed_status["last_attempt"] else None,
