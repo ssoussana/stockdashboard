@@ -527,41 +527,59 @@ async function refreshFearGreed(){
 
     const compLines = d.score.components.map(c => `${c.name}: ${c.val}`).join('\n');
     document.getElementById('gaugeWrap').title = compLines;
+
+    renderIndexStrip(d.market);
   }catch(e){
     document.getElementById('fgLabel').textContent = 'unavailable';
   }
 }
 
-const INDEX_LABELS = [
-  { key: 'dow', label: 'DOW' },
-  { key: 'nasdaq', label: 'NASDAQ' },
-  { key: 'sp500', label: 'S&P 500' },
-];
+// DOW and S&P 500 via their tracking ETFs (DIA/SPY) — these track their
+// indices extremely tightly, effectively no meaningful gap. NASDAQ uses a
+// separate fetch for ONEQ (Fidelity Nasdaq COMPOSITE Index Fund) instead
+// of QQQ, since QQQ only tracks the Nasdaq-100 (100 largest non-financial
+// companies) — a real, different index from what "the Nasdaq" usually means.
+let _nasdaqQuote = null;
 
-async function refreshIndices(){
-  const strip = document.getElementById('indexStripCore');
+async function refreshNasdaqProxy(){
   try{
-    const res = await fetch('/api/indices');
+    const res = await fetch('/api/quotes?symbols=ONEQ');
     const data = await res.json();
-    const asOf = `as of ${new Date().toLocaleString()}`;
-    strip.innerHTML = INDEX_LABELS.map(({key, label}) => {
-      const m = data[key];
-      if(!m || !m.ok || m.value == null){
-        return `<span class="idx" title="${(m && m.error) || ''}"><span class="name">${label}</span> <span class="val">&mdash;</span></span>`;
-      }
-      const up = (m.percent_change ?? 0) >= 0;
-      const chg = m.percent_change != null
-        ? `<span class="chg ${up?'up':'down'}">${up?'+':''}${m.percent_change.toFixed(2)}%</span>`
-        : '';
-      return `<span class="idx" title="${asOf}">
-        <span class="name">${label}</span>
-        <span class="val">${m.value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</span>
-        ${chg}
-      </span>`;
-    }).join('');
+    _nasdaqQuote = data.ONEQ;
   }catch(e){
-    strip.innerHTML = INDEX_LABELS.map(({label}) => `<span class="idx"><span class="name">${label}</span> <span class="val">&mdash;</span></span>`).join('');
+    _nasdaqQuote = null;
   }
+}
+
+function renderIndexStrip(market){
+  const strip = document.getElementById('indexStripCore');
+  if(!market){ return; }
+  const asOf = `as of ${new Date().toLocaleString()}`;
+
+  function etfSpan(label, sym){
+    const m = market[sym];
+    if(!m) return `<span class="idx"><span class="name">${label}</span> <span class="val">&mdash;</span></span>`;
+    const up = m.pct >= 0;
+    return `<span class="idx" title="${asOf}">
+      <span class="name">${label}</span>
+      <span class="val">$${m.price.toFixed(2)}</span>
+      <span class="chg ${up?'up':'down'}">${up?'+':''}${m.pct.toFixed(2)}%</span>
+    </span>`;
+  }
+
+  function nasdaqSpan(){
+    if(!_nasdaqQuote || !_nasdaqQuote.ok){
+      return `<span class="idx"><span class="name">NASDAQ</span> <span class="val">&mdash;</span></span>`;
+    }
+    const up = _nasdaqQuote.d >= 0;
+    return `<span class="idx" title="${asOf} \u2014 via ONEQ (Fidelity Nasdaq Composite Index Fund)">
+      <span class="name">NASDAQ</span>
+      <span class="val">$${_nasdaqQuote.c.toFixed(2)}</span>
+      <span class="chg ${up?'up':'down'}">${up?'+':''}${_nasdaqQuote.dp.toFixed(2)}%</span>
+    </span>`;
+  }
+
+  strip.innerHTML = etfSpan('DOW', 'DIA') + nasdaqSpan() + etfSpan('S&P 500', 'SPY');
 }
 
 async function refreshMacro(){
@@ -619,6 +637,7 @@ function renderMacroValue(elId, entry, formatter){
 // ---------- orchestration ----------
 async function refreshAll(){
   updatedEl.textContent = 'refreshing…';
+  await refreshNasdaqProxy();
   await Promise.all([refreshStocks(), refreshFearGreed()]);
   updatedEl.textContent = `updated ${new Date().toLocaleTimeString()}`;
   state.secondsLeft = REFRESH_MS/1000;
@@ -921,7 +940,6 @@ document.addEventListener('click', (e) => {
   refreshEarnings();
   refreshGold();
   refreshFedCalendar();
-  refreshIndices();
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(refreshMovers, 15 * 60 * 1000);
@@ -929,7 +947,6 @@ document.addEventListener('click', (e) => {
   setInterval(refreshEarnings, 60 * 60 * 1000);
   setInterval(refreshGold, 60 * 60 * 1000);
   setInterval(refreshFedCalendar, 60 * 60 * 1000);
-  setInterval(refreshIndices, REFRESH_MS);
   setInterval(tickCountdown, 1000);
 })();
 </script>
