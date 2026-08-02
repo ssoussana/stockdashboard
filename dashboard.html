@@ -527,36 +527,41 @@ async function refreshFearGreed(){
 
     const compLines = d.score.components.map(c => `${c.name}: ${c.val}`).join('\n');
     document.getElementById('gaugeWrap').title = compLines;
-
-    renderIndexStrip(d.market);
   }catch(e){
     document.getElementById('fgLabel').textContent = 'unavailable';
   }
 }
 
-// DOW/NASDAQ/S&P 500 shown via their tracking ETFs (DIA/QQQ/SPY) — Finnhub's
-// free tier doesn't expose raw index quotes, and feargreedchart.com already
-// carries these as part of the sentiment payload, so no extra call is needed.
-const INDEX_PROXIES = [
-  { label: 'DOW', sym: 'DIA' },
-  { label: 'NASDAQ', sym: 'QQQ' },
-  { label: 'S&P 500', sym: 'SPY' },
+const INDEX_LABELS = [
+  { key: 'dow', label: 'DOW' },
+  { key: 'nasdaq', label: 'NASDAQ' },
+  { key: 'sp500', label: 'S&P 500' },
 ];
 
-function renderIndexStrip(market){
+async function refreshIndices(){
   const strip = document.getElementById('indexStripCore');
-  if(!market){ return; }
-  const asOf = `as of ${new Date().toLocaleString()}`;
-  strip.innerHTML = INDEX_PROXIES.map(({label, sym}) => {
-    const m = market[sym];
-    if(!m) return `<span class="idx"><span class="name">${label}</span> <span class="val">&mdash;</span></span>`;
-    const up = m.pct >= 0;
-    return `<span class="idx" title="${asOf}">
-      <span class="name">${label}</span>
-      <span class="val">$${m.price.toFixed(2)}</span>
-      <span class="chg ${up?'up':'down'}">${up?'+':''}${m.pct.toFixed(2)}%</span>
-    </span>`;
-  }).join('');
+  try{
+    const res = await fetch('/api/indices');
+    const data = await res.json();
+    const asOf = `as of ${new Date().toLocaleString()}`;
+    strip.innerHTML = INDEX_LABELS.map(({key, label}) => {
+      const m = data[key];
+      if(!m || !m.ok || m.value == null){
+        return `<span class="idx" title="${(m && m.error) || ''}"><span class="name">${label}</span> <span class="val">&mdash;</span></span>`;
+      }
+      const up = (m.percent_change ?? 0) >= 0;
+      const chg = m.percent_change != null
+        ? `<span class="chg ${up?'up':'down'}">${up?'+':''}${m.percent_change.toFixed(2)}%</span>`
+        : '';
+      return `<span class="idx" title="${asOf}">
+        <span class="name">${label}</span>
+        <span class="val">${m.value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</span>
+        ${chg}
+      </span>`;
+    }).join('');
+  }catch(e){
+    strip.innerHTML = INDEX_LABELS.map(({label}) => `<span class="idx"><span class="name">${label}</span> <span class="val">&mdash;</span></span>`).join('');
+  }
 }
 
 async function refreshMacro(){
@@ -916,6 +921,7 @@ document.addEventListener('click', (e) => {
   refreshEarnings();
   refreshGold();
   refreshFedCalendar();
+  refreshIndices();
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(refreshMovers, 15 * 60 * 1000);
@@ -923,6 +929,7 @@ document.addEventListener('click', (e) => {
   setInterval(refreshEarnings, 60 * 60 * 1000);
   setInterval(refreshGold, 60 * 60 * 1000);
   setInterval(refreshFedCalendar, 60 * 60 * 1000);
+  setInterval(refreshIndices, REFRESH_MS);
   setInterval(tickCountdown, 1000);
 })();
 </script>
