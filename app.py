@@ -1082,33 +1082,51 @@ def fetch_next_fred_release(release_id):
 
 
 def fetch_last_cpi_ppi():
-    """Most recent REPORTED (not scheduled) CPI/PPI, with the actual value
-    and the consensus estimate it was measured against — via Finnhub's
-    economic calendar (same key used elsewhere, no new signup). Free-tier
-    access to this specific endpoint isn't fully confirmed in advance, so
-    errors here are surfaced directly rather than assumed away."""
+    """Most recent REPORTED (not scheduled) Core CPI/Core PPI, with the
+    actual value and the consensus estimate it was measured against — via
+    FMP's economic calendar. Uses the SAME FMP key already working for
+    movers, no new signup. Core (excludes food/energy) rather than
+    headline, since Core is the more policy-relevant number the Fed
+    actually weighs more heavily. FMP's exact field names for this specific
+    endpoint aren't confirmed from documentation alone, so this checks a
+    couple of likely variants and surfaces the raw shape in errors if
+    parsing fails, rather than assuming and failing silently."""
     today = datetime.now().date()
     r = _http.get(
-        "https://finnhub.io/api/v1/calendar/economic",
+        "https://financialmodelingprep.com/stable/economic-calendar",
         params={
             "from": (today - timedelta(days=35)).isoformat(),
             "to": today.isoformat(),
-            "token": API_KEY,
+            "apikey": FMP_API_KEY,
         },
         timeout=(5, 15),
     )
     r.raise_for_status()
-    payload = r.json()
-    events = payload.get("economicCalendar")
-    if events is None:
-        raise ValueError(f"unexpected response shape, no economicCalendar key: {str(payload)[:150]}")
+    events = r.json()
+    if not isinstance(events, list):
+        raise ValueError(f"unexpected response shape (not a list): {str(events)[:150]}")
+
+    def get_actual(e):
+        return e.get("actual")
+
+    def get_estimate(e):
+        return e.get("estimate", e.get("consensus"))
+
+    def get_name(e):
+        return e.get("event", e.get("name", ""))
+
+    def get_country(e):
+        return e.get("country", "")
+
+    def get_time(e):
+        return e.get("date", e.get("time", ""))
 
     def find_latest(keyword):
         matches = [
             e for e in events
-            if e.get("country") == "US"
-            and keyword.lower() in (e.get("event") or "").lower()
-            and e.get("actual") is not None
+            if get_country(e) in ("US", "USA", "United States")
+            and keyword.lower() in (get_name(e) or "").lower()
+            and get_actual(e) is not None
         ]
         if not matches:
             return None
@@ -1116,9 +1134,12 @@ def fetch_last_cpi_ppi():
         # variant — prefer the headline one (name doesn't contain "core")
         # when both exist, rather than picking whichever happens to sort
         # last among identical timestamps.
-        non_core = [e for e in matches if "core" not in (e.get("event") or "").lower()]
-        pool = non_core or matches
-        return sorted(pool, key=lambda e: e.get("time", ""))[-1]
+        # Prefer the "Core" variant (excludes food/energy) over headline —
+        # falls back to headline only if no Core version was reported.
+        core_only = [e for e in matches if "core" in (get_name(e) or "").lower()]
+        pool = core_only or matches
+        best = sorted(pool, key=get_time)[-1]
+        return {"event": get_name(best), "time": get_time(best), "actual": get_actual(best), "estimate": get_estimate(best)}
 
     return find_latest("CPI"), find_latest("PPI")
 
@@ -1200,6 +1221,7 @@ def fed_calendar():
 def fed_calendar_debug():
     return jsonify({
         "fred_key_set": bool(FRED_API_KEY),
+        "fmp_key_set": bool(FMP_API_KEY),
         "release_ids": FRED_RELEASE_IDS,
         "cache_seconds_old": round(time.time() - _fed_cache["ts"], 1) if _fed_cache.get("data") else None,
         "cached_data": _fed_cache.get("data"),
