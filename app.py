@@ -1192,6 +1192,43 @@ def _fed_background_loop():
 threading.Thread(target=_fed_background_loop, daemon=True).start()
 
 
+# ---------- Standalone diagnostics — not used by the dashboard itself ----------
+@app.route("/api/debug/twelvedata-symbol-search")
+def twelvedata_symbol_search_debug():
+    """Query Twelve Data's own symbol reference directly (e.g. ?q=Dow Jones)
+    to find the exact correct symbol string for something, rather than
+    guessing from documentation or search results."""
+    query = request.args.get("q", "")
+    if not TWELVE_DATA_API_KEY:
+        return jsonify({"error": "TWELVE_DATA_API_KEY not set"})
+    if not query:
+        return jsonify({"error": "pass a ?q=... search term, e.g. ?q=Dow+Jones"})
+    r = _http.get(
+        "https://api.twelvedata.com/symbol_search",
+        params={"symbol": query, "apikey": TWELVE_DATA_API_KEY},
+        timeout=(5, 15),
+    )
+    return jsonify(r.json())
+
+
+@app.route("/api/debug/twelvedata-quote-test")
+def twelvedata_quote_test_debug():
+    """Test any candidate symbol format directly against the real /quote
+    endpoint (e.g. ?symbol=.IXIC) — symbol_search doesn't always surface
+    every format the quote endpoint itself might actually accept."""
+    symbol = request.args.get("symbol", "")
+    if not TWELVE_DATA_API_KEY:
+        return jsonify({"error": "TWELVE_DATA_API_KEY not set"})
+    if not symbol:
+        return jsonify({"error": "pass a ?symbol=... to test, e.g. ?symbol=.IXIC"})
+    r = _http.get(
+        "https://api.twelvedata.com/quote",
+        params={"symbol": symbol, "apikey": TWELVE_DATA_API_KEY},
+        timeout=(5, 15),
+    )
+    return jsonify(r.json())
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"Default watchlist: {', '.join(DEFAULT_SYMBOLS)}")
