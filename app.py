@@ -1210,6 +1210,24 @@ _indices_cache = {"data": None, "ts": 0}
 _indices_status = {"last_attempt": None, "last_error": None}
 
 
+@app.route("/api/debug/twelvedata-symbol-search")
+def twelvedata_symbol_search_debug():
+    """One-off diagnostic — not used by the dashboard itself. Lets us query
+    Twelve Data's own symbol reference directly (e.g. ?q=Dow Jones) to find
+    the exact correct symbol string for indices, rather than guessing."""
+    query = request.args.get("q", "")
+    if not TWELVE_DATA_API_KEY:
+        return jsonify({"error": "TWELVE_DATA_API_KEY not set"})
+    if not query:
+        return jsonify({"error": "pass a ?q=... search term, e.g. ?q=Dow+Jones"})
+    r = _http.get(
+        "https://api.twelvedata.com/symbol_search",
+        params={"symbol": query, "apikey": TWELVE_DATA_API_KEY},
+        timeout=(5, 15),
+    )
+    return jsonify(r.json())
+
+
 def fetch_indices_all():
     _indices_status["last_attempt"] = time.time()
     print("[indices] requesting Dow/Nasdaq/S&P real index values", flush=True)
