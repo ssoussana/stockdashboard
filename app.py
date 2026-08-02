@@ -705,11 +705,17 @@ def fetch_fred_series(series_id):
         raise ValueError("no published observations")
 
     latest = float(valid[0]["value"])
-    result = {"value": latest, "date": valid[0]["date"], "change": None, "percent_change": None}
+    result = {"value": latest, "date": valid[0]["date"], "change": None, "percent_change": None, "prior_percent_change": None}
     if len(valid) > 1:
         prev = float(valid[1]["value"])
         result["change"] = latest - prev
         result["percent_change"] = (latest - prev) / prev * 100 if prev else None
+    if len(valid) > 2:
+        # The period-over-period change one step further back — lets a
+        # caller compare "this period's rate" to "the prior period's rate"
+        # to see if a trend is accelerating or decelerating.
+        prior = float(valid[2]["value"])
+        result["prior_percent_change"] = (prev - prior) / prior * 100 if prior else None
     return result
 
 
@@ -1118,10 +1124,12 @@ def fetch_fed_calendar():
                     # headline figure — no unit conversion needed.
                     value = round(r["change"], 1) if r["change"] is not None else None
                     unit = "K jobs"
+                    out[key] = {"ok": True, "value": value, "unit": unit, "date": r["date"]}
                 else:
                     value = round(r["percent_change"], 2) if r["percent_change"] is not None else None
+                    prior = round(r["prior_percent_change"], 2) if r["prior_percent_change"] is not None else None
                     unit = "%"
-                out[key] = {"ok": True, "value": value, "unit": unit, "date": r["date"]}
+                    out[key] = {"ok": True, "value": value, "unit": unit, "date": r["date"], "prior_value": prior}
             except Exception as e:
                 print(f"[fed] {key} ({series_id}) failed: {e!r}", flush=True)
                 out[key] = {"ok": False, "error": str(e)}

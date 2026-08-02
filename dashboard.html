@@ -689,38 +689,51 @@ async function refreshFedCalendar(){
       return `${sign}${info.value}K jobs`;
     }
 
-    function lastRow(label, info, colorBySign){
-      if(!info || !info.ok || info.value == null) return '';
-      const dateStr = info.date ? new Date(info.date+'T00:00:00').toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '';
-      const cls = colorBySign ? (info.value > 0 ? 'up' : (info.value < 0 ? 'down' : '')) : '';
-      const chip = `<span class="stat ${cls}">${formatLastValue(info)}</span>`;
+    function combinedRow(label, lastInfo, nextDateVal, colorMode){
+      const hasLast = lastInfo && lastInfo.ok && lastInfo.value != null;
+      const hasNext = !!nextDateVal;
+      if(!hasLast && !hasNext) return '';
+
+      let nextText = '';
+      if(hasNext){
+        const d = new Date(nextDateVal + 'T00:00:00');
+        nextText = `Next ${d.toLocaleDateString(undefined,{month:'short',day:'numeric'})} \u00b7 ${daysAwayLabel(d, today)}`;
+      }
+
+      let chip = '';
+      if(hasLast){
+        const dateStr = lastInfo.date ? new Date(lastInfo.date+'T00:00:00').toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '';
+        let cls = '';
+        if(colorMode === 'sign'){
+          // Jobs — more added is unambiguously favorable, no benchmark needed.
+          cls = lastInfo.value > 0 ? 'up' : (lastInfo.value < 0 ? 'down' : '');
+        }else if(colorMode === 'sign-inverted'){
+          // CPI/PPI — the value IS already the month-over-month change, so
+          // color it directly: positive means prices rose (unfavorable,
+          // red), negative means they fell (favorable, green). Opposite
+          // sign convention from jobs, where positive is favorable.
+          cls = lastInfo.value < 0 ? 'up' : (lastInfo.value > 0 ? 'down' : '');
+        }
+        chip = `<span class="stat ${cls}">${formatLastValue(lastInfo)} (${dateStr})</span>`;
+      }
+
       return `<div class="earn-row">
         <div class="movers-row" style="border-bottom:none;padding-bottom:2px;">
-          <span><span class="sym">${label}</span><span class="name">${dateStr}</span></span>
+          <span><span class="sym">${label}</span></span>
+          <span class="pct">${nextText}</span>
         </div>
         <div class="earn-stats">${chip}</div>
       </div>`;
     }
 
-    function nextRow(label, dateVal){
-      if(!dateVal) return '';
-      const d = new Date(dateVal + 'T00:00:00');
-      return `<div class="movers-row">
-        <span><span class="sym">${label}</span><span class="name">${d.toLocaleDateString(undefined,{month:'short',day:'numeric'})}</span></span>
-        <span class="pct">${daysAwayLabel(d, today)}</span>
-      </div>`;
-    }
-
-    // CPI/PPI shown neutral — a month-over-month change alone isn't
-    // inherently "good" or "bad" without a benchmark to compare against.
-    html.push(lastRow('Last Core CPI', data.cpi_last, false));
-    html.push(nextRow('Next CPI', data.cpi && data.cpi.ok ? data.cpi.next_date : null));
-    html.push(lastRow('Last Core PPI', data.ppi_last, false));
-    html.push(nextRow('Next PPI', data.ppi && data.ppi.ok ? data.ppi.next_date : null));
-    // Jobs colored by sign — more jobs added is unambiguously favorable,
-    // no benchmark needed for that read.
-    html.push(lastRow('Last Jobs Report', data.jobs_last, true));
-    html.push(nextRow('Next Jobs Report', data.jobs && data.jobs.ok ? data.jobs.next_date : null));
+    // CPI/PPI colored by trend (accelerating vs decelerating) — no
+    // analyst estimate to compare against anymore.
+    // CPI/PPI colored by the sign of the month-over-month change itself —
+    // positive (prices rose) is unfavorable/red, negative is favorable/green.
+    html.push(combinedRow('Core CPI', data.cpi_last, data.cpi && data.cpi.ok ? data.cpi.next_date : null, 'sign-inverted'));
+    html.push(combinedRow('Core PPI', data.ppi_last, data.ppi && data.ppi.ok ? data.ppi.next_date : null, 'sign-inverted'));
+    // Jobs colored by sign — more jobs added is unambiguously favorable.
+    html.push(combinedRow('Jobs Report', data.jobs_last, data.jobs && data.jobs.ok ? data.jobs.next_date : null, 'sign'));
 
     if(data.fomc && data.fomc.ok && data.fomc.start){
       const dStart = new Date(data.fomc.start + 'T00:00:00');
