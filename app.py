@@ -25,6 +25,7 @@ Then open http://localhost:5000
 import collections
 import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -590,64 +591,198 @@ threading.Thread(target=_sma_background_loop, daemon=True).start()
 
 
 # ---------- S&P 500 constituents (used to filter market movers) ----------
-# Membership changes only a handful of times a year, so this is cached for
-# a full day rather than refreshed on the same cadence as the movers list
-# itself — keeps this to about 1 extra FMP call/day.
-SP500_CONSTITUENTS_CACHE_SECONDS = 24 * 60 * 60
-_sp500_constituents_cache = load_json_cache("sp500_constituents_cache.json") or {"data": None, "ts": 0}
-_sp500_constituents_status = {"last_attempt": None, "last_error": None}
+# FMP's /stable/sp500-constituent endpoint turned out to require a paid
+# plan (402 Payment Required on Steve's free-tier key). Membership only
+# changes a handful of times a year, so instead of paying for a live API,
+# this re-scrapes Wikipedia's public "List of S&P 500 companies" page
+# every 45 days in the background — no redeploy needed for the list
+# itself to stay current, only this mechanism needed deploying once.
+#
+# SP500_SYMBOLS_SEED is the fallback: a static snapshot (sourced from the
+# same Wikipedia page) current as of 2026-08-03, used until the first
+# live scrape succeeds, and used again afterward if a scrape ever fails
+# or returns something implausible (Wikipedia's table markup changing
+# would break the parser below — this bounds the damage from that).
+SP500_SYMBOLS_SEED = frozenset({
+    "A", "AAPL", "ABBV", "ABNB", "ABT", "ACGL", "ACN", "ADBE", "ADI", "ADM",
+    "ADP", "ADSK", "AEE", "AEP", "AES", "AFL", "AIG", "AIZ", "AJG", "AKAM",
+    "ALB", "ALGN", "ALL", "ALLE", "AMAT", "AMCR", "AMD", "AME", "AMGN", "AMP",
+    "AMT", "AMZN", "ANET", "AON", "AOS", "APA", "APD", "APH", "APO", "APP",
+    "APTV", "ARE", "ARES", "ATO", "AVB", "AVGO", "AVY", "AWK", "AXON", "AXP",
+    "AZO", "BA", "BAC", "BALL", "BAX", "BBY", "BDX", "BEN", "BF.B", "BG",
+    "BIIB", "BKNG", "BKR", "BLDR", "BLK", "BMY", "BNY", "BR", "BRK.B", "BRO",
+    "BSX", "BX", "BXP", "C", "CAG", "CAH", "CARR", "CASY", "CAT", "CB",
+    "CBOE", "CBRE", "CCI", "CCL", "CDNS", "CDW", "CEG", "CF", "CFG", "CHD",
+    "CHRW", "CHTR", "CI", "CIEN", "CINF", "CL", "CLX", "CMCSA", "CME", "CMG",
+    "CMI", "CMS", "CNC", "CNP", "COF", "COHR", "COIN", "COO", "COP", "COR",
+    "COST", "CPAY", "CPB", "CPRT", "CPT", "CRH", "CRL", "CRM", "CRWD", "CSCO",
+    "CSGP", "CSX", "CTAS", "CTSH", "CTVA", "CVNA", "CVS", "CVX", "D", "DAL",
+    "DASH", "DD", "DDOG", "DE", "DECK", "DELL", "DG", "DGX", "DHI", "DHR",
+    "DIS", "DLR", "DLTR", "DOC", "DOV", "DOW", "DPZ", "DRI", "DTE", "DUK",
+    "DVA", "DVN", "DXCM", "EA", "EBAY", "ECL", "ED", "EFX", "EG", "EIX",
+    "EL", "ELV", "EME", "EMR", "EOG", "EPAM", "EQIX", "EQR", "EQT", "ERIE",
+    "ES", "ESS", "ETN", "ETR", "EVRG", "EW", "EXC", "EXE", "EXPD", "EXPE",
+    "EXR", "F", "FANG", "FAST", "FCX", "FDS", "FDX", "FE", "FFIV", "FICO",
+    "FIS", "FISV", "FITB", "FIX", "FOX", "FOXA", "FRT", "FSLR", "FTNT", "FTV",
+    "GD", "GDDY", "GE", "GEHC", "GEN", "GEV", "GILD", "GIS", "GL", "GLW",
+    "GM", "GNRC", "GOOG", "GOOGL", "GPC", "GPN", "GRMN", "GS", "GWW", "HAL",
+    "HAS", "HBAN", "HCA", "HD", "HIG", "HII", "HLT", "HON", "HOOD", "HPE",
+    "HPQ", "HRL", "HSIC", "HST", "HSY", "HUBB", "HUM", "HWM", "IBKR", "IBM",
+    "ICE", "IDXX", "IEX", "IFF", "INCY", "INTC", "INTU", "INVH", "IP", "IQV",
+    "IR", "IRM", "ISRG", "IT", "ITW", "IVZ", "J", "JBHT", "JBL", "JCI",
+    "JKHY", "JNJ", "JPM", "KDP", "KEY", "KEYS", "KHC", "KIM", "KKR", "KLAC",
+    "KMB", "KMI", "KO", "KR", "KVUE", "L", "LDOS", "LEN", "LH", "LHX",
+    "LII", "LIN", "LITE", "LLY", "LMT", "LNT", "LOW", "LRCX", "LULU", "LUV",
+    "LVS", "LYB", "LYV", "MA", "MAA", "MAR", "MAS", "MCD", "MCHP", "MCK",
+    "MCO", "MDLZ", "MDT", "MET", "META", "MGM", "MKC", "MLM", "MMM", "MNST",
+    "MO", "MOS", "MPC", "MPWR", "MRK", "MRNA", "MRSH", "MS", "MSCI", "MSFT",
+    "MSI", "MTB", "MTD", "MU", "NCLH", "NDAQ", "NDSN", "NEE", "NEM", "NFLX",
+    "NI", "NKE", "NOC", "NOW", "NRG", "NSC", "NTAP", "NTRS", "NUE", "NVDA",
+    "NVR", "NWS", "NWSA", "NXPI", "O", "ODFL", "OKE", "OMC", "ON", "ORCL",
+    "ORLY", "OTIS", "OXY", "PANW", "PAYX", "PCAR", "PCG", "PEG", "PEP", "PFE",
+    "PFG", "PG", "PGR", "PH", "PHM", "PKG", "PLD", "PLTR", "PM", "PNC",
+    "PNR", "PNW", "PODD", "POOL", "PPG", "PPL", "PRU", "PSA", "PSKY", "PSX",
+    "PTC", "PWR", "PYPL", "Q", "QCOM", "RCL", "REG", "REGN", "RF", "RJF",
+    "RL", "RMD", "ROK", "ROL", "ROP", "ROST", "RSG", "RTX", "RVTY", "SATS",
+    "SBAC", "SBUX", "SCHW", "SHW", "SJM", "SLB", "SMCI", "SNA", "SNDK", "SNPS",
+    "SO", "SOLV", "SPG", "SPGI", "SRE", "STE", "STLD", "STT", "STX", "STZ",
+    "SW", "SWK", "SWKS", "SYF", "SYK", "SYY", "T", "TAP", "TDG", "TDY",
+    "TECH", "TEL", "TER", "TFC", "TGT", "TJX", "TKO", "TMO", "TMUS", "TPL",
+    "TPR", "TRGP", "TRMB", "TROW", "TRV", "TSCO", "TSLA", "TSN", "TT", "TTD",
+    "TTWO", "TXN", "TXT", "TYL", "UAL", "UBER", "UDR", "UHS", "ULTA", "UNH",
+    "UNP", "UPS", "URI", "USB", "V", "VEEV", "VICI", "VLO", "VLTO", "VMC",
+    "VRSK", "VRSN", "VRT", "VRTX", "VST", "VTR", "VTRS", "VZ", "WAB", "WAT",
+    "WBD", "WDAY", "WDC", "WEC", "WELL", "WFC", "WM", "WMB", "WMT", "WRB",
+    "WSM", "WST", "WTW", "WY", "WYNN", "XEL", "XOM", "XYL", "XYZ", "YUM",
+    "ZBH", "ZBRA", "ZTS",
+})
+
+SP500_REFRESH_SECONDS = 45 * 24 * 60 * 60  # ~45 days
+SP500_WIKI_URL = "https://en.wikipedia.org/api/rest_v1/page/html/List_of_S%26P_500_companies"
+# A parsed list is only trusted if it falls in this range — the real
+# count is ~503 (500 companies, a few with dual share classes). Anything
+# wildly outside this suggests the parser broke against a markup change,
+# not a real S&P 500 size change.
+SP500_PLAUSIBLE_COUNT_RANGE = (450, 550)
+
+_sp500_cache = load_json_cache("sp500_constituents_cache.json") or {"data": None, "ts": 0}
+_sp500_status = {"last_attempt": None, "last_error": None, "last_success_source": None}
 
 
-def fetch_sp500_constituents():
-    _sp500_constituents_status["last_attempt"] = time.time()
+def _strip_html(fragment):
+    """Strips tags and unescapes entities from an HTML fragment — used
+    instead of pulling in a full HTML-parsing dependency for this one
+    scheduled task."""
+    import html as _html_mod
+    text = re.sub(r"<[^>]+>", "", fragment)
+    return _html_mod.unescape(text).strip()
+
+
+def fetch_sp500_symbols_from_wikipedia():
+    """Scrapes Wikipedia's "List of S&P 500 companies" page for the
+    current constituent table. There's no clean structured API for this
+    data for free, so this parses the rendered HTML table directly —
+    more fragile than a real API, which is why every result is sanity-
+    checked against SP500_PLAUSIBLE_COUNT_RANGE before being trusted."""
+    _sp500_status["last_attempt"] = time.time()
     try:
         r = _http.get(
-            "https://financialmodelingprep.com/stable/sp500-constituent",
-            params={"apikey": FMP_API_KEY},
-            timeout=(5, 15),
+            SP500_WIKI_URL,
+            headers={"User-Agent": "StockDashboard-Personal/1.0 (personal project; low-frequency, every 45 days)"},
+            timeout=(5, 20),
         )
-        if r.text.lstrip().startswith("<"):
-            raise ValueError(f"got HTML instead of JSON (likely blocked) — first 150 chars: {r.text[:150]!r}")
         r.raise_for_status()
-        data = r.json()
-        if not isinstance(data, list):
-            raise ValueError(f"unexpected response shape: {str(data)[:150]}")
-        symbols = sorted({item.get("symbol") for item in data if item.get("symbol")})
-        _sp500_constituents_cache["data"] = symbols
-        _sp500_constituents_cache["ts"] = time.time()
-        save_json_cache("sp500_constituents_cache.json", _sp500_constituents_cache)
-        _sp500_constituents_status["last_error"] = None
-        print(f"[sp500_constituents] updated: {len(symbols)} symbols", flush=True)
+        html_text = r.text
+
+        # The constituents table is the first table on the page marked
+        # both "wikitable" and "sortable" (the separate historical
+        # "changes" table further down isn't marked sortable).
+        table_match = None
+        for m in re.finditer(r"<table\b([^>]*)>(.*?)</table>", html_text, re.S | re.I):
+            attrs, body = m.group(1), m.group(2)
+            if "wikitable" in attrs and "sortable" in attrs:
+                table_match = body
+                break
+        if table_match is None:
+            raise ValueError("couldn't find a wikitable+sortable table on the page")
+
+        rows = re.findall(r"<tr\b.*?>(.*?)</tr>", table_match, re.S | re.I)
+        symbols = []
+        rejected = []
+        for row in rows:
+            cells = re.findall(r"<td\b.*?>(.*?)</td>", row, re.S | re.I)
+            if not cells:
+                continue  # header row uses <th>, not <td> — skip it
+            symbol = _strip_html(cells[0])
+            # Tickers are short, uppercase, and at most one "." (e.g.
+            # BRK.B). Anything else suggests we grabbed the wrong cell —
+            # e.g. a stray footnote marker or a markup change — so it's
+            # dropped rather than silently polluting the filter list.
+            if symbol and re.fullmatch(r"[A-Z]{1,6}(\.[A-Z]{1,2})?", symbol):
+                symbols.append(symbol)
+            elif symbol:
+                rejected.append(symbol)
+
+        symbols = sorted(set(symbols))
+        lo, hi = SP500_PLAUSIBLE_COUNT_RANGE
+        if not (lo <= len(symbols) <= hi):
+            raise ValueError(
+                f"parsed {len(symbols)} valid-looking symbols ({len(rejected)} rejected), "
+                f"outside plausible range {lo}-{hi} — Wikipedia's table markup may have changed. "
+                f"Sample rejected: {rejected[:5]}"
+            )
+
+        _sp500_cache["data"] = symbols
+        _sp500_cache["ts"] = time.time()
+        save_json_cache("sp500_constituents_cache.json", _sp500_cache)
+        _sp500_status["last_error"] = None
+        _sp500_status["last_success_source"] = "wikipedia"
+        print(f"[sp500] updated from Wikipedia: {len(symbols)} symbols", flush=True)
     except Exception as e:
-        _sp500_constituents_status["last_error"] = str(e)
-        print(f"[sp500_constituents] fetch failed: {e!r}", flush=True)
+        _sp500_status["last_error"] = str(e)
+        print(f"[sp500] Wikipedia scrape failed, keeping last-known-good list: {e!r}", flush=True)
         raise
+
+
+def get_sp500_symbols():
+    """The set actually used for filtering — live-scraped data if
+    available, falling back to the embedded seed otherwise."""
+    live = _sp500_cache.get("data")
+    return frozenset(live) if live else SP500_SYMBOLS_SEED
 
 
 @app.route("/api/debug/sp500-constituents")
 def sp500_constituents_debug():
-    cached = _sp500_constituents_cache.get("data")
+    live = _sp500_cache.get("data")
     return jsonify({
-        "count": len(cached) if cached else None,
-        "cache_seconds_old": round(time.time() - _sp500_constituents_cache["ts"], 1) if cached else None,
-        "last_attempt_seconds_ago": round(time.time() - _sp500_constituents_status["last_attempt"], 1) if _sp500_constituents_status["last_attempt"] else None,
-        "last_error": _sp500_constituents_status["last_error"],
+        "active_count": len(get_sp500_symbols()),
+        "source": "wikipedia (live)" if live else "seed fallback (static, 2026-08-03)",
+        "cache_seconds_old": round(time.time() - _sp500_cache["ts"], 1) if live else None,
+        "last_attempt_seconds_ago": round(time.time() - _sp500_status["last_attempt"], 1) if _sp500_status["last_attempt"] else None,
+        "last_error": _sp500_status["last_error"],
+        "refresh_interval_days": SP500_REFRESH_SECONDS / 86400,
     })
 
 
-def _sp500_constituents_background_loop():
-    print("[sp500_constituents] background thread started", flush=True)
-    time.sleep(2)  # fetch early — movers filtering needs this populated
+def _sp500_background_loop():
+    print("[sp500] background thread started", flush=True)
+    time.sleep(35)  # staggered — see movers loop comment
     while True:
-        if FMP_API_KEY:
+        cache_age = time.time() - _sp500_cache["ts"] if _sp500_cache.get("data") else None
+        if cache_age is None or cache_age >= SP500_REFRESH_SECONDS:
             try:
-                fetch_sp500_constituents()
+                fetch_sp500_symbols_from_wikipedia()
             except Exception as e:
-                print(f"[sp500_constituents] fetch_sp500_constituents raised: {e!r}", flush=True)
-        time.sleep(SP500_CONSTITUENTS_CACHE_SECONDS)
+                print(f"[sp500] fetch_sp500_symbols_from_wikipedia raised: {e!r}", flush=True)
+            sleep_s = SP500_REFRESH_SECONDS
+        else:
+            # A fresh-enough cache already exists (e.g. survived a
+            # redeploy) — just wait out the rest of its 45-day window.
+            sleep_s = SP500_REFRESH_SECONDS - cache_age
+        time.sleep(sleep_s)
 
 
-threading.Thread(target=_sp500_constituents_background_loop, daemon=True).start()
+threading.Thread(target=_sp500_background_loop, daemon=True).start()
 
 
 # ---------- Market movers (top gainers/losers, whole-market — not tied to
@@ -723,19 +858,9 @@ def fetch_movers_all():
         print(f"[movers] fetch failed: {e!r}", flush=True)
         raise
 
-    sp500_symbols = _sp500_constituents_cache.get("data")
-    if sp500_symbols:
-        sp500_set = set(sp500_symbols)
-        gainers = [item for item in gainers_raw if item["symbol"] in sp500_set][:5]
-        losers = [item for item in losers_raw if item["symbol"] in sp500_set][:5]
-    else:
-        # S&P 500 list hasn't loaded yet (e.g. right after a fresh
-        # deploy) — fall back to the unfiltered top 5 rather than
-        # showing nothing, and this corrects itself once the
-        # constituents fetch completes.
-        print("[movers] S&P 500 constituent list not yet available, showing unfiltered movers", flush=True)
-        gainers = gainers_raw[:5]
-        losers = losers_raw[:5]
+    sp500 = get_sp500_symbols()
+    gainers = [item for item in gainers_raw if item["symbol"] in sp500][:5]
+    losers = [item for item in losers_raw if item["symbol"] in sp500][:5]
 
     _movers_cache["data"] = {"gainers": gainers, "losers": losers}
     _movers_cache["ts"] = time.time()
@@ -763,8 +888,8 @@ def movers_debug():
         "last_error": _movers_status["last_error"],
         "process_id": os.getpid(),
         "process_uptime_seconds": round(time.time() - _process_started_at, 1),
-        "sp500_filter_active": bool(_sp500_constituents_cache.get("data")),
-        "sp500_constituent_count": len(_sp500_constituents_cache["data"]) if _sp500_constituents_cache.get("data") else None,
+        "sp500_filter_active": True,
+        "sp500_constituent_count": len(get_sp500_symbols()),
     })
 
 
@@ -1668,7 +1793,12 @@ def real_index_route(key):
         return jsonify({"ok": False, "error": f"unknown index key '{key}'"}), 404
     if _index_caches[key]["data"] is None:
         return jsonify({"ok": False, "error": "not fetched yet"})
-    return jsonify(_index_caches[key]["data"])
+    # Merge in the actual server-side fetch time — separate from page
+    # refresh time, which is what the frontend previously (incorrectly)
+    # showed in the tooltip on hover.
+    payload = dict(_index_caches[key]["data"])
+    payload["fetched_at"] = _index_caches[key]["ts"]
+    return jsonify(payload)
 
 
 @app.route("/api/debug/index/<key>")

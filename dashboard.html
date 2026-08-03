@@ -539,7 +539,7 @@ let _indexStripRenderedOnce = false;
 
 async function refreshFearGreed(){
   try{
-    const res = await fetch('https://feargreedchart.com/api/?action=all');
+    const res = await fetch('/api/fear-greed');
     const d = await res.json();
     const score = d.score.score;
     const [label, color] = scoreLabel(score);
@@ -581,7 +581,7 @@ async function refreshRealIndices(){
     try{
       const res = await fetch(`/api/index/${key}`);
       const data = await res.json();
-      _realIndexQuotes[key] = data.ok ? { ok: true, c: data.value, d: data.change, dp: data.percent_change, via: data.via } : null;
+      _realIndexQuotes[key] = data.ok ? { ok: true, c: data.value, d: data.change, dp: data.percent_change, via: data.via, fetchedAt: data.fetched_at } : null;
     }catch(e){
       _realIndexQuotes[key] = null;
     }
@@ -590,7 +590,6 @@ async function refreshRealIndices(){
 
 function renderIndexStrip(){
   const strip = document.getElementById('indexStripCore');
-  const asOf = `as of ${new Date().toLocaleString()}`;
 
   function realIndexSpan(label, key, fallbackName, formatter){
     const q = _realIndexQuotes[key];
@@ -600,7 +599,12 @@ function renderIndexStrip(){
     const up = q.d >= 0;
     const isReal = q.via === 'real index';
     const valStr = formatter ? formatter(q.c) : q.c.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
-    const tip = isReal ? `${asOf} \u2014 real ${label}` : `${asOf} \u2014 via ${q.via || fallbackName}`;
+    // Actual server-side fetch time for THIS index, not page-render
+    // time — each index updates on its own cadence, so this can
+    // legitimately differ between DOW/NASDAQ/S&P/etc even though the
+    // page itself refreshes every minute.
+    const fetchedAt = q.fetchedAt ? `data fetched ${new Date(q.fetchedAt * 1000).toLocaleString()}` : 'fetch time unknown';
+    const tip = isReal ? `${fetchedAt} \u2014 real ${label}` : `${fetchedAt} \u2014 via ${q.via || fallbackName}`;
     const chgStr = q.dp != null ? `<span class="chg ${up?'up':'down'}">${up?'+':''}${q.dp.toFixed(2)}%</span>` : '';
     return `<span class="idx" title="${tip}">
       <span class="name">${label}</span>
