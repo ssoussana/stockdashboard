@@ -547,15 +547,16 @@ async function refreshFearGreed(){
     const compLines = d.score.components.map(c => `${c.name}: ${c.val}`).join('\n');
     document.getElementById('gaugeWrap').title = compLines;
 
-    // DOW/NASDAQ/S&P only update during regular trading hours — outside
-    // that window, whatever was last shown just stays frozen on screen.
-    // Always render at least once on initial load though, even if that
-    // happens to be outside market hours, so the page doesn't sit there
-    // showing blank placeholders indefinitely.
-    if(isRegularMarketHoursClient() || !_indexStripRenderedOnce){
-      renderIndexStrip();
-      _indexStripRenderedOnce = true;
-    }
+    // The backend already enforces the "don't fetch fresh external data
+    // outside market hours" rule (it just re-serves its last cached value
+    // then). So we always re-render here from whatever's in
+    // _realIndexQuotes — numbers simply won't change until the backend
+    // actually updates them. Previously this was gated behind
+    // isRegularMarketHoursClient(), which meant that if the very first
+    // render ever landed on a transient fallback value (e.g. RapidAPI
+    // briefly failing over to the DIA ETF price instead of the real Dow
+    // index), the tile would freeze on that wrong value indefinitely.
+    renderIndexStrip();
   }catch(e){
     document.getElementById('fgLabel').textContent = 'unavailable';
   }
