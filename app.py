@@ -189,6 +189,7 @@ def register_known_symbols(symbols):
         _wake_event.set()
         for sym in new:
             threading.Thread(target=fetch_earnings_immediate, args=(sym,), daemon=True).start()
+            threading.Thread(target=fetch_pe_immediate, args=(sym,), daemon=True).start()
         if TWELVE_DATA_API_KEY:
             for sym in new:
                 threading.Thread(target=fetch_sma_immediate, args=(sym,), daemon=True).start()
@@ -1236,6 +1237,129 @@ def _earnings_background_loop():
 
 
 threading.Thread(target=_earnings_background_loop, daemon=True).start()
+
+
+# ---------- P/E ratio ----------
+# Company fundamentals — a different, heavier Finnhub endpoint than the
+# quote endpoint, so it's cached like earnings (once daily, P/E doesn't
+# move fast enough to need live updates) rather than every minute.
+PE_CACHE_SECONDS = 24 * 60 * 60
+PE_CACHE_FILE = "pe_cache.json"
+_pe_cache = load_json_cache(PE_CACHE_FILE)  # symbol -> {"data": {...}, "ts": float}
+_pe_executor = ThreadPoolExecutor(max_workers=2)  # same conservative
+    # concurrency as earnings — this host has shown it doesn't tolerate
+    # bursts well.
+
+# Same retry-sooner-on-failure pattern as earnings.
+PE_RETRY_DELAY_SECONDS = 10 * 60
+PE_MAX_QUICK_RETRIES = 2
+
+
+def fetch_pe_one(sym, _retry=True):
+    """Trailing-twelve-month P/E via Finnhub's company-fundamentals
+    endpoint. A single retry after a brief pause, same reasoning as
+    fetch_earnings_one — this host has shown bursts can transiently
+    fail together."""
+    try:
+        r = _http.get(
+            "https://finnhub.io/api/v1/stock/metric",
+            params={"symbol": sym, "metric": "all", "token": API_KEY},
+            timeout=15,
+        )
+        r.raise_for_status()
+        metric = r.json().get("metric", {})
+        pe = metric.get("peTTM")
+        if pe is None:
+            pe = metric.get("peBasicExclExtraTTM")
+        if pe is None:
+            return {"ok": True, "pe": None}  # valid response, just no P/E (e.g. unprofitable company)
+        return {"ok": True, "pe": round(float(pe), 1)}
+    except requests.exceptions.HTTPError:
+        return {"ok": False, "error": f"HTTP {r.status_code}"}
+    except Exception as e:
+        if _retry:
+            time.sleep(3)
+            return fetch_pe_one(sym, _retry=False)
+        return {"ok": False, "error": str(e)}
+
+
+def fetch_pe_immediate(sym):
+    """One-off fetch for a brand-new watchlist symbol, so it doesn't
+    wait for the next scheduled daily pass."""
+    print(f"[pe] immediate fetch for new symbol {sym}", flush=True)
+    data = fetch_pe_one(sym)
+    _pe_cache[sym] = {"data": data, "ts": time.time()}
+    save_json_cache(PE_CACHE_FILE, _pe_cache)
+
+
+def fetch_pe_all(symbols):
+    print(f"[pe] requesting {len(symbols)} symbols", flush=True)
+    results = list(_pe_executor.map(fetch_pe_one, symbols))
+    now = time.time()
+    ok_count = 0
+    for sym, data in zip(symbols, results):
+        _pe_cache[sym] = {"data": data, "ts": now}
+        if data.get("ok"):
+            ok_count += 1
+    save_json_cache(PE_CACHE_FILE, _pe_cache)
+    print(f"[pe] pass complete ({ok_count}/{len(symbols)} ok)", flush=True)
+    return ok_count, len(symbols)
+
+
+@app.route("/api/pe")
+def pe():
+    symbols = parse_symbols_param()
+    register_known_symbols(symbols)
+    out = {}
+    for sym in symbols:
+        entry = _pe_cache.get(sym)
+        out[sym] = entry["data"] if entry else {"ok": False, "error": "not fetched yet"}
+    return jsonify(out)
+
+
+@app.route("/api/debug/pe")
+def pe_debug():
+    ages = {sym: round(time.time() - e["ts"], 1) for sym, e in _pe_cache.items()}
+    return jsonify({
+        "finnhub_key_set": bool(API_KEY),
+        "known_symbols_active": active_known_symbols(),
+        "cache_seconds_old": ages,
+        "cached_data": {sym: e["data"] for sym, e in _pe_cache.items()},
+    })
+
+
+def _pe_background_loop():
+    print("[pe] background thread started", flush=True)
+    time.sleep(20)  # staggered — after earnings' 15s, before nothing critical
+    consecutive_failures = 0
+    while True:
+        # Same movers-sweep deferral as earnings — see that loop's comment.
+        waited = 0
+        while _movers_sweep_active.is_set() and waited < 25 * 60:
+            print("[pe] movers sweep in progress, waiting...", flush=True)
+            time.sleep(30)
+            waited += 30
+
+        try:
+            ok_count, total = fetch_pe_all(active_known_symbols())
+            if total > 0 and ok_count == 0:
+                consecutive_failures += 1
+            else:
+                consecutive_failures = 0
+        except Exception as e:
+            print(f"[pe] fetch_pe_all raised: {e!r}", flush=True)
+            consecutive_failures += 1
+
+        if 0 < consecutive_failures <= PE_MAX_QUICK_RETRIES:
+            print(f"[pe] pass came back empty, retrying sooner "
+                  f"({consecutive_failures}/{PE_MAX_QUICK_RETRIES})", flush=True)
+            sleep_s = PE_RETRY_DELAY_SECONDS
+        else:
+            sleep_s = PE_CACHE_SECONDS
+        time.sleep(sleep_s)
+
+
+threading.Thread(target=_pe_background_loop, daemon=True).start()
 
 
 # ---------- Gold / Silver / Bitcoin ----------

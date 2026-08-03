@@ -20,6 +20,7 @@
     --red:#ff4d63;
     --red-dim:#4a1620;
     --amber:#f2b84b;
+    --blue:#4d9eff;
     --lime:#a8d64b;
     --sans:'Inter',system-ui,sans-serif;
     --mono:'IBM Plex Mono',ui-monospace,monospace;
@@ -160,6 +161,11 @@
   }
   .remove-btn:hover{color:var(--red);background:var(--red-dim);}
   .price{font-family:var(--sans);font-weight:700;font-size:22px;margin-top:6px;}
+  .pe-ratio{font-family:var(--sans);font-weight:400;font-size:13px;color:var(--muted);margin-left:6px;}
+  .pe-ratio.pe-low{color:var(--green);}
+  .pe-ratio.pe-healthy{color:var(--blue);}
+  .pe-ratio.pe-high{color:var(--amber);}
+  .pe-ratio.pe-extreme{color:var(--red);}
   .price.signal-up{color:var(--green);}
   .price.signal-down{color:var(--red);}
   .price.signal-mixed{color:var(--amber);}
@@ -303,7 +309,7 @@ function buildCards(){
           <button class="remove-btn" data-sym="${sym}" title="Remove ${sym}" aria-label="Remove ${sym}">&times;</button>
         </div>
       </div>
-      <span class="price" id="price-${sym}">&mdash;</span>
+      <span class="price" id="price-${sym}">&mdash;</span><span class="pe-ratio" id="pe-${sym}"></span>
       <div class="chg" id="chg-${sym}">waiting for data</div>
       <svg class="spark" id="spark-${sym}" width="100%" height="30" viewBox="0 0 200 30" preserveAspectRatio="none"></svg>
       <div class="sma" id="sma-${sym}">SMA loading&hellip;</div>
@@ -334,6 +340,7 @@ async function removeSymbol(sym){
   refreshAll();
   refreshSma();
   refreshEarnings();
+  refreshPE();
 }
 
 async function addSymbol(sym){
@@ -354,6 +361,7 @@ async function addSymbol(sym){
   refreshAll();
   refreshSma();
   refreshEarnings();
+  refreshPE();
 }
 
 // Picks up tickers anyone else added or removed — called on the normal
@@ -377,6 +385,7 @@ async function syncWatchlist(){
     buildCards();
     refreshSma();
     refreshEarnings();
+    refreshPE();
   }catch(e){ /* non-fatal — just try again next cycle */ }
 }
 
@@ -893,6 +902,27 @@ async function refreshEarnings(){
   }
 }
 
+async function refreshPE(){
+  try{
+    const res = await fetch(`/api/pe?symbols=${SYMBOLS.join(',')}`);
+    const data = await res.json();
+    SYMBOLS.forEach(sym => {
+      const el = document.getElementById(`pe-${sym}`);
+      if(!el) return;
+      const info = data[sym];
+      if(!(info && info.ok && info.pe != null)){
+        el.textContent = '';
+        el.className = 'pe-ratio';
+        return;
+      }
+      const pe = info.pe;
+      const tier = pe <= 30 ? 'pe-low' : pe <= 55 ? 'pe-healthy' : pe <= 65 ? 'pe-high' : 'pe-extreme';
+      el.textContent = `(PE ${pe.toFixed(1)})`;
+      el.className = `pe-ratio ${tier}`;
+    });
+  }catch(e){ /* non-fatal — PE labels just stay blank */ }
+}
+
 document.getElementById('refreshBtn').addEventListener('click', refreshAll);
 
 function tickCountdown(){
@@ -995,12 +1025,14 @@ document.addEventListener('click', (e) => {
   refreshSma();
   refreshMovers();
   refreshEarnings();
+  refreshPE();
   refreshGold();
   refreshFedCalendar();
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(refreshMovers, 15 * 60 * 1000);
   setInterval(refreshEarnings, 60 * 60 * 1000);
+  setInterval(refreshPE, 60 * 60 * 1000);
   setInterval(refreshGold, 60 * 60 * 1000);
   setInterval(refreshFedCalendar, 60 * 60 * 1000);
   setInterval(tickCountdown, 1000);
