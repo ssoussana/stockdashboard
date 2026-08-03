@@ -709,13 +709,31 @@ function symLink(sym){
   return `<a href="https://finance.yahoo.com/quote/${encodeURIComponent(sym)}" target="_blank" rel="noopener noreferrer" class="sym-link">${sym}</a>`;
 }
 
+const _isAndroid = /Android/i.test(navigator.userAgent);
+
 function tradeLink(sym){
-  // Small separate icon next to the symbol — goes straight to E*TRADE's
-  // quote/trade page for one-click access from Steve's own brokerage.
-  // Kept apart from symLink() so the main symbol text still points to
-  // Yahoo (works for anyone viewing, including Steve's friend, who may
-  // not have an E*TRADE account).
-  return `<a href="https://us.etrade.com/etx/mkt/quotes?symbol=${encodeURIComponent(sym)}" target="_blank" rel="noopener noreferrer" class="trade-link" title="Trade ${sym} on E*TRADE">&#8599;</a>`;
+  // Small separate icon next to the symbol — goes to E*TRADE for one-click
+  // access from Steve's own brokerage. Kept apart from symLink() so the
+  // main symbol text still points to Yahoo (works for anyone viewing,
+  // including Steve's friend, who may not have an E*TRADE account).
+  const symEnc = encodeURIComponent(sym);
+  const path = `us.etrade.com/etx/mkt/quotes?symbol=${symEnc}`;
+  const httpsUrl = `https://${path}`;
+
+  if (_isAndroid) {
+    // Android "Intent URI" — tells the OS to hand this off directly to
+    // E*TRADE's official app (package com.etrade.mobilepro.activity) if
+    // it's installed, and to fall back to the normal browser link
+    // otherwise. Whether it lands exactly on the symbol's quote screen
+    // inside the app (vs. just opening the app generally) depends on
+    // E*TRADE's own in-app deep-link handling, which isn't publicly
+    // documented — but it should open the app either way.
+    const fallback = encodeURIComponent(httpsUrl);
+    const intentUrl = `intent://${path}#Intent;scheme=https;package=com.etrade.mobilepro.activity;S.browser_fallback_url=${fallback};end`;
+    return `<a href="${intentUrl}" class="trade-link" title="Trade ${sym} on E*TRADE">&#8599;</a>`;
+  }
+
+  return `<a href="${httpsUrl}" target="_blank" rel="noopener noreferrer" class="trade-link" title="Trade ${sym} on E*TRADE">&#8599;</a>`;
 }
 
 function fmtRevenue(v){
