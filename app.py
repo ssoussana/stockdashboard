@@ -1463,6 +1463,16 @@ REAL_INDEX_CADENCE_SECONDS = {
 _index_caches_loaded = load_json_cache("indices_cache.json")
 _index_caches = {key: _index_caches_loaded.get(key, {"data": None, "ts": 0}) for key in REAL_INDEX_SOURCES}
 _index_status = {key: {"last_attempt": None, "last_error": None} for key in REAL_INDEX_SOURCES}
+_index_consecutive_failures = {key: 0 for key in REAL_INDEX_SOURCES}
+
+# After a transient real-index failure (e.g. a RapidAPI read timeout), we
+# retry sooner than the full per-index cadence rather than leaving the
+# ETF-scale fallback value on screen for up to ~90 minutes. Capped at 2
+# quick retries so a genuine extended outage doesn't blow through the
+# monthly quota — after that we fall back to the normal slower cadence
+# until a call succeeds again.
+INDEX_RETRY_DELAY_SECONDS = 5 * 60
+INDEX_MAX_QUICK_RETRIES = 2
 
 
 def fetch_index_all(key):
@@ -1513,6 +1523,7 @@ def real_index_debug(key):
         "cached_data": cache["data"],
         "last_attempt_seconds_ago": round(time.time() - status["last_attempt"], 1) if status["last_attempt"] else None,
         "last_error": status["last_error"],
+        "consecutive_failures": _index_consecutive_failures[key],
     })
 
 
@@ -1541,9 +1552,22 @@ def _make_index_background_loop(key, stagger_seconds):
                     fetch_index_all(key)
                 except Exception as e:
                     print(f"[{key}] fetch_index_all raised: {e!r}", flush=True)
-                # Tighter loop right around open to catch it precisely;
-                # normal per-index cadence once solidly into the session.
-                sleep_s = 2 * 60 if near_open and not is_regular_market_hours() else REAL_INDEX_CADENCE_SECONDS[key]
+
+                failed = _index_status[key]["last_error"] is not None
+                if failed:
+                    _index_consecutive_failures[key] += 1
+                else:
+                    _index_consecutive_failures[key] = 0
+
+                if failed and _index_consecutive_failures[key] <= INDEX_MAX_QUICK_RETRIES:
+                    # Transient failure — retry again soon instead of
+                    # sitting on a wrong-scale fallback value for the
+                    # rest of this index's normal cadence window.
+                    sleep_s = INDEX_RETRY_DELAY_SECONDS
+                else:
+                    # Tighter loop right around open to catch it precisely;
+                    # normal per-index cadence once solidly into the session.
+                    sleep_s = 2 * 60 if near_open and not is_regular_market_hours() else REAL_INDEX_CADENCE_SECONDS[key]
             else:
                 print(f"[{key}] outside regular market hours, skipping", flush=True)
                 # Sleep until 5 min before the near-open window starts,
