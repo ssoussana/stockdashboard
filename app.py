@@ -44,6 +44,14 @@ if not API_KEY:
 # reports every symbol as unavailable instead of crashing the whole app.
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
+# Optional — currently only used by the /api/debug/test-fmp-* routes,
+# which exist to probe whether specific FMP free-tier endpoints (market
+# hours/holidays, index quotes) are actually accessible on Steve's key
+# before building anything real on top of them — FMP's free tier has
+# already surprised us twice with 402s on endpoints that looked free
+# from the docs (sp500-constituent, batch-quote).
+FMP_API_KEY = os.environ.get("FMP_API_KEY")
+
 # Optional — only needed for real crude oil/treasury-yield data.
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
 
@@ -1946,6 +1954,52 @@ threading.Thread(target=_make_index_background_loop("sp500", 14), daemon=True).s
 threading.Thread(target=_make_index_background_loop("dow", 20), daemon=True).start()
 threading.Thread(target=_make_commodity_background_loop("crude_oil", 26), daemon=True).start()
 threading.Thread(target=_make_index_background_loop("treasury_10y", 32), daemon=True).start()
+
+
+# ---------- Temporary: FMP free-tier exploration routes ----------
+# One-off test routes to check whether specific FMP endpoints are
+# actually accessible on Steve's free-tier key, before building
+# anything real on top of them. FMP's free tier has already surprised
+# us twice with 402 Payment Required on endpoints their own docs list
+# without any obvious "paid only" marker (sp500-constituent,
+# batch-quote) — these just report the raw result so we know for sure
+# either way. Safe to delete once we've decided whether to use either.
+@app.route("/api/debug/test-fmp-market-hours")
+def test_fmp_market_hours():
+    if not FMP_API_KEY:
+        return jsonify({"error": "FMP_API_KEY not set"})
+    try:
+        r = _http.get(
+            "https://financialmodelingprep.com/stable/exchange-market-hours",
+            params={"exchange": "NASDAQ", "apikey": FMP_API_KEY},
+            timeout=(5, 15),
+        )
+        return jsonify({
+            "status_code": r.status_code,
+            "is_html_block_page": r.text.lstrip().startswith("<"),
+            "raw_response": r.text[:1000],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
+@app.route("/api/debug/test-fmp-index-quote")
+def test_fmp_index_quote():
+    if not FMP_API_KEY:
+        return jsonify({"error": "FMP_API_KEY not set"})
+    try:
+        r = _http.get(
+            "https://financialmodelingprep.com/stable/quote",
+            params={"symbol": "^GSPC", "apikey": FMP_API_KEY},
+            timeout=(5, 15),
+        )
+        return jsonify({
+            "status_code": r.status_code,
+            "is_html_block_page": r.text.lstrip().startswith("<"),
+            "raw_response": r.text[:1000],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)})
 
 
 if __name__ == "__main__":
