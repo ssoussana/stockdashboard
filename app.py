@@ -1079,15 +1079,22 @@ threading.Thread(target=_macro_background_loop, daemon=True).start()
 EARNINGS_CACHE_SECONDS = 24 * 60 * 60  # earnings dates rarely change intraday
 EARNINGS_CACHE_FILE = "earnings_cache.json"
 _earnings_cache = load_json_cache(EARNINGS_CACHE_FILE)  # symbol -> {"data": {...}, "ts": float}
-_earnings_executor = ThreadPoolExecutor(max_workers=4)
+_earnings_executor = ThreadPoolExecutor(max_workers=2)
 
 
-def fetch_earnings_one(sym):
+def fetch_earnings_one(sym, _retry=True):
     """Earnings info for one symbol, via Finnhub's earnings calendar
     (already using this key elsewhere — no new signup needed). Prefers a
     result reported within the last 14 days (real numbers, beat/miss vs
     estimates) over a future scheduled date, since a just-reported quarter
-    is more useful to see than "next earnings in 3 months"."""
+    is more useful to see than "next earnings in 3 months".
+
+    Retries once after a brief pause on any failure — repeated observation
+    showed 100% of symbols failing simultaneously with the same connection
+    timeout, which points to general host contention on this 0.5 CPU
+    instance rather than a one-off fluke, so a single retry gives a
+    transient slow patch a second chance rather than poisoning the cache
+    for a full day."""
     today = datetime.now().date()
     try:
         r = _http.get(
@@ -1098,7 +1105,7 @@ def fetch_earnings_one(sym):
                 "to": (today + timedelta(days=180)).isoformat(),
                 "token": API_KEY,
             },
-            timeout=6,
+            timeout=15,
         )
         r.raise_for_status()
         events = r.json().get("earningsCalendar", [])
@@ -1133,6 +1140,9 @@ def fetch_earnings_one(sym):
     except requests.exceptions.HTTPError:
         return {"ok": False, "error": f"HTTP {r.status_code}"}
     except Exception as e:
+        if _retry:
+            time.sleep(3)
+            return fetch_earnings_one(sym, _retry=False)
         return {"ok": False, "error": str(e)}
 
 
@@ -1149,10 +1159,14 @@ def fetch_earnings_all(symbols):
     print(f"[earnings] requesting {len(symbols)} symbols", flush=True)
     results = list(_earnings_executor.map(fetch_earnings_one, symbols))
     now = time.time()
+    ok_count = 0
     for sym, data in zip(symbols, results):
         _earnings_cache[sym] = {"data": data, "ts": now}
+        if data.get("ok"):
+            ok_count += 1
     save_json_cache(EARNINGS_CACHE_FILE, _earnings_cache)
-    print("[earnings] pass complete", flush=True)
+    print(f"[earnings] pass complete ({ok_count}/{len(symbols)} ok)", flush=True)
+    return ok_count, len(symbols)
 
 
 @app.route("/api/earnings")
@@ -1176,10 +1190,20 @@ def earnings_debug():
     })
 
 
+# After a pass where every symbol failed (all connection timeouts,
+# suggesting transient host contention rather than real "no data"),
+# retry sooner than the full 24h cadence rather than leaving the cache
+# poisoned with errors for the rest of the day. Capped so a genuine
+# extended Finnhub outage doesn't retry indefinitely.
+EARNINGS_RETRY_DELAY_SECONDS = 10 * 60
+EARNINGS_MAX_QUICK_RETRIES = 2
+
+
 def _earnings_background_loop():
     print("[earnings] background thread started", flush=True)
     time.sleep(15)  # staggered — see movers loop comment. This one's the
                      # heaviest burst (4 parallel workers), so it goes last.
+    consecutive_failures = 0
     while True:
         # Defer to an in-progress movers sweep (~20min of steady Finnhub
         # traffic) rather than firing 4 simultaneous calls into it — that
@@ -1193,10 +1217,22 @@ def _earnings_background_loop():
             waited += 30
 
         try:
-            fetch_earnings_all(active_known_symbols())
+            ok_count, total = fetch_earnings_all(active_known_symbols())
+            if total > 0 and ok_count == 0:
+                consecutive_failures += 1
+            else:
+                consecutive_failures = 0
         except Exception as e:
             print(f"[earnings] fetch_earnings_all raised: {e!r}", flush=True)
-        time.sleep(EARNINGS_CACHE_SECONDS)
+            consecutive_failures += 1
+
+        if 0 < consecutive_failures <= EARNINGS_MAX_QUICK_RETRIES:
+            print(f"[earnings] pass came back empty, retrying sooner "
+                  f"({consecutive_failures}/{EARNINGS_MAX_QUICK_RETRIES})", flush=True)
+            sleep_s = EARNINGS_RETRY_DELAY_SECONDS
+        else:
+            sleep_s = EARNINGS_CACHE_SECONDS
+        time.sleep(sleep_s)
 
 
 threading.Thread(target=_earnings_background_loop, daemon=True).start()
