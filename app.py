@@ -28,7 +28,8 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
+from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 
@@ -1250,121 +1251,139 @@ def finnhub_quote_test_debug():
     return jsonify(r.json())
 
 
-# ---------- Nasdaq Composite: real index attempt, with ONEQ fallback ----------
-NASDAQ_CACHE_SECONDS = 5 * 60  # conservative — this vendor's rate limits are unknown
-_nasdaq_cache = {"data": None, "ts": 0}
-_nasdaq_status = {"last_attempt": None, "last_error": None}
+# ---------- Real indices (Nasdaq, S&P 500), with ETF fallback ----------
+def is_regular_market_hours():
+    """US regular session only: 9:30am-4:00pm ET, Mon-Fri. Approximation —
+    doesn't account for market holidays or early-close days."""
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    if now_et.weekday() >= 5:  # Sat=5, Sun=6
+        return False
+    t = now_et.time()
+    return dt_time(9, 30) <= t < dt_time(16, 0)
 
 
-def fetch_nasdaq_real_index():
-    """Real Nasdaq Composite via a RapidAPI Yahoo Finance wrapper — the only
-    endpoint format confirmed from their docs is "STOCK History" (POST),
-    so this pulls a short history and treats the most recent two points as
-    the current value and prior close. Response shape isn't documented
-    anywhere accessible, so this checks a few plausible variants."""
-    r = _http.post(
-        "https://yahoo-finance160.p.rapidapi.com/history",
+# Real index values via RapidAPI's "yahoo-finance-real-time1" listing —
+# confirmed working via live tests (2026-08-02) for both ^IXIC and ^GSPC:
+# the stock/get-options endpoint's response includes a full quote object
+# for the underlying symbol even though it's nominally an options-chain
+# endpoint. Confirmed quoteType "INDEX" — this is the real index, not an
+# ETF proxy. Free tier: 500 requests/month, SHARED across all symbols on
+# this key — cadence below is sized for both indices sharing that budget.
+REAL_INDEX_CACHE_SECONDS = 60 * 60  # hourly per index — two indices at this
+    # cadence during market hours only: ~6.5 checks/day each * ~21 trading
+    # days/month * 2 indices ~= 273/month combined, safely under the
+    # confirmed 500/month shared limit.
+REAL_INDEX_SYMBOLS = {"nasdaq": ("^IXIC", "ONEQ"), "sp500": ("^GSPC", "SPY")}
+_index_caches = {key: {"data": None, "ts": 0} for key in REAL_INDEX_SYMBOLS}
+_index_status = {key: {"last_attempt": None, "last_error": None} for key in REAL_INDEX_SYMBOLS}
+
+
+def fetch_real_index_quote(yahoo_symbol):
+    r = _http.get(
+        "https://yahoo-finance-real-time1.p.rapidapi.com/stock/get-options",
+        params={"symbol": yahoo_symbol, "lang": "en-US", "region": "US"},
         headers={
             "Content-Type": "application/json",
-            "x-rapidapi-host": "yahoo-finance160.p.rapidapi.com",
+            "x-rapidapi-host": "yahoo-finance-real-time1.p.rapidapi.com",
             "x-rapidapi-key": RAPIDAPI_KEY,
         },
-        json={"stock": "^IXIC", "period": "5d"},
         timeout=(5, 15),
     )
     r.raise_for_status()
     payload = r.json()
-    rows = payload if isinstance(payload, list) else (
-        payload.get("data") or payload.get("history") or payload.get("result")
-    )
-    if not isinstance(rows, list) or len(rows) < 2:
-        raise ValueError(f"unexpected or insufficient response shape: {str(payload)[:200]}")
-
-    def get_close(row):
-        for key in ("close", "Close", "adjClose", "Adj Close"):
-            if row.get(key) is not None:
-                return float(row[key])
-        raise ValueError(f"no close field in row: {str(row)[:100]}")
-
-    latest = get_close(rows[-1])
-    prev = get_close(rows[-2])
-    return {
-        "ok": True,
-        "value": round(latest, 2),
-        "change": round(latest - prev, 2),
-        "percent_change": round((latest - prev) / prev * 100, 2) if prev else None,
-    }
+    try:
+        quote = payload["optionChain"]["result"][0]["quote"]
+        price = float(quote["regularMarketPrice"])
+        change = float(quote["regularMarketChange"])
+        percent_change = float(quote["regularMarketChangePercent"])
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        raise ValueError(f"unexpected response shape: {e!r} — raw: {str(payload)[:200]}")
+    return {"ok": True, "value": round(price, 2), "change": round(change, 2), "percent_change": round(percent_change, 2)}
 
 
-def fetch_nasdaq_via_oneq():
-    """Fallback — the ONEQ ETF via Finnhub, same source already used
+def fetch_etf_fallback(etf_symbol):
+    """Fallback — a tracking ETF via Finnhub, same source already used
     elsewhere in the app."""
     r = _http.get(
         "https://finnhub.io/api/v1/quote",
-        params={"symbol": "ONEQ", "token": API_KEY},
+        params={"symbol": etf_symbol, "token": API_KEY},
         timeout=(5, 15),
     )
     r.raise_for_status()
     q = r.json()
     if q.get("c") is None or q.get("c") == 0:
-        raise ValueError("ONEQ quote unavailable")
-    return {"ok": True, "value": q["c"], "change": q.get("d"), "percent_change": q.get("dp"), "via": "ONEQ (proxy)"}
+        raise ValueError(f"{etf_symbol} quote unavailable")
+    return {"ok": True, "value": q["c"], "change": q.get("d"), "percent_change": q.get("dp"), "via": f"{etf_symbol} (proxy)"}
 
 
-def fetch_nasdaq_all():
-    _nasdaq_status["last_attempt"] = time.time()
+def fetch_index_all(key):
+    yahoo_symbol, etf_symbol = REAL_INDEX_SYMBOLS[key]
+    status = _index_status[key]
+    status["last_attempt"] = time.time()
     result = None
     if RAPIDAPI_KEY:
         try:
-            result = fetch_nasdaq_real_index()
+            result = fetch_real_index_quote(yahoo_symbol)
             result["via"] = "real index"
-            _nasdaq_status["last_error"] = None
+            status["last_error"] = None
         except Exception as e:
-            print(f"[nasdaq] real index attempt failed, falling back to ONEQ: {e!r}", flush=True)
-            _nasdaq_status["last_error"] = str(e)
+            print(f"[{key}] real index attempt failed, falling back to {etf_symbol}: {e!r}", flush=True)
+            status["last_error"] = str(e)
     if result is None:
         try:
-            result = fetch_nasdaq_via_oneq()
+            result = fetch_etf_fallback(etf_symbol)
         except Exception as e:
-            print(f"[nasdaq] ONEQ fallback also failed: {e!r}", flush=True)
+            print(f"[{key}] {etf_symbol} fallback also failed: {e!r}", flush=True)
             result = {"ok": False, "error": str(e)}
-            if _nasdaq_status["last_error"] is None:
-                _nasdaq_status["last_error"] = str(e)
-    _nasdaq_cache["data"] = result
-    _nasdaq_cache["ts"] = time.time()
-    print(f"[nasdaq] updated: {result}", flush=True)
+            if status["last_error"] is None:
+                status["last_error"] = str(e)
+    _index_caches[key]["data"] = result
+    _index_caches[key]["ts"] = time.time()
+    print(f"[{key}] updated: {result}", flush=True)
 
 
-@app.route("/api/nasdaq")
-def nasdaq():
-    if _nasdaq_cache["data"] is None:
+@app.route("/api/index/<key>")
+def real_index_route(key):
+    if key not in REAL_INDEX_SYMBOLS:
+        return jsonify({"ok": False, "error": f"unknown index key '{key}'"}), 404
+    if _index_caches[key]["data"] is None:
         return jsonify({"ok": False, "error": "not fetched yet"})
-    return jsonify(_nasdaq_cache["data"])
+    return jsonify(_index_caches[key]["data"])
 
 
-@app.route("/api/debug/nasdaq")
-def nasdaq_debug():
+@app.route("/api/debug/index/<key>")
+def real_index_debug(key):
+    if key not in REAL_INDEX_SYMBOLS:
+        return jsonify({"ok": False, "error": f"unknown index key '{key}'"}), 404
+    cache = _index_caches[key]
+    status = _index_status[key]
     return jsonify({
         "rapidapi_key_set": bool(RAPIDAPI_KEY),
-        "cache_seconds_old": round(time.time() - _nasdaq_cache["ts"], 1) if _nasdaq_cache["data"] else None,
-        "cached_data": _nasdaq_cache["data"],
-        "last_attempt_seconds_ago": round(time.time() - _nasdaq_status["last_attempt"], 1) if _nasdaq_status["last_attempt"] else None,
-        "last_error": _nasdaq_status["last_error"],
+        "cache_seconds_old": round(time.time() - cache["ts"], 1) if cache["data"] else None,
+        "cached_data": cache["data"],
+        "last_attempt_seconds_ago": round(time.time() - status["last_attempt"], 1) if status["last_attempt"] else None,
+        "last_error": status["last_error"],
     })
 
 
-def _nasdaq_background_loop():
-    print("[nasdaq] background thread started", flush=True)
-    time.sleep(8)  # staggered
-    while True:
-        try:
-            fetch_nasdaq_all()
-        except Exception as e:
-            print(f"[nasdaq] fetch_nasdaq_all raised: {e!r}", flush=True)
-        time.sleep(NASDAQ_CACHE_SECONDS)
+def _make_index_background_loop(key, stagger_seconds):
+    def loop():
+        print(f"[{key}] background thread started", flush=True)
+        time.sleep(stagger_seconds)
+        while True:
+            if is_regular_market_hours():
+                try:
+                    fetch_index_all(key)
+                except Exception as e:
+                    print(f"[{key}] fetch_index_all raised: {e!r}", flush=True)
+            else:
+                print(f"[{key}] outside regular market hours, skipping", flush=True)
+            time.sleep(REAL_INDEX_CACHE_SECONDS)
+    return loop
 
 
-threading.Thread(target=_nasdaq_background_loop, daemon=True).start()
+threading.Thread(target=_make_index_background_loop("nasdaq", 8), daemon=True).start()
+threading.Thread(target=_make_index_background_loop("sp500", 14), daemon=True).start()
 
 
 if __name__ == "__main__":

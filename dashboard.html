@@ -512,6 +512,24 @@ function scoreLabel(score){
   return ['Extreme Greed', '#1fd67a'];
 }
 
+function isRegularMarketHoursClient(){
+  // US regular session only: 9:30am-4:00pm ET, Mon-Fri. Approximation —
+  // doesn't account for market holidays or early-close days.
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour12: false,
+    weekday: 'short', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(new Date());
+  const get = type => parts.find(p => p.type === type)?.value;
+  const weekday = get('weekday');
+  if(weekday === 'Sat' || weekday === 'Sun') return false;
+  const hour = parseInt(get('hour'), 10);
+  const minute = parseInt(get('minute'), 10);
+  const minutesSinceMidnight = hour * 60 + minute;
+  return minutesSinceMidnight >= (9 * 60 + 30) && minutesSinceMidnight < (16 * 60);
+}
+
+let _indexStripRenderedOnce = false;
+
 async function refreshFearGreed(){
   try{
     const res = await fetch('https://feargreedchart.com/api/?action=all');
@@ -528,7 +546,15 @@ async function refreshFearGreed(){
     const compLines = d.score.components.map(c => `${c.name}: ${c.val}`).join('\n');
     document.getElementById('gaugeWrap').title = compLines;
 
-    renderIndexStrip(d.market);
+    // DOW/NASDAQ/S&P only update during regular trading hours — outside
+    // that window, whatever was last shown just stays frozen on screen.
+    // Always render at least once on initial load though, even if that
+    // happens to be outside market hours, so the page doesn't sit there
+    // showing blank placeholders indefinitely.
+    if(isRegularMarketHoursClient() || !_indexStripRenderedOnce){
+      renderIndexStrip(d.market);
+      _indexStripRenderedOnce = true;
+    }
   }catch(e){
     document.getElementById('fgLabel').textContent = 'unavailable';
   }
@@ -539,15 +565,18 @@ async function refreshFearGreed(){
 // separate fetch for ONEQ (Fidelity Nasdaq COMPOSITE Index Fund) instead
 // of QQQ, since QQQ only tracks the Nasdaq-100 (100 largest non-financial
 // companies) — a real, different index from what "the Nasdaq" usually means.
-let _nasdaqQuote = null;
+// S&P 500 uses the same real-index-with-ETF-fallback approach.
+let _realIndexQuotes = { nasdaq: null, sp500: null };
 
-async function refreshNasdaqProxy(){
-  try{
-    const res = await fetch('/api/nasdaq');
-    const data = await res.json();
-    _nasdaqQuote = data.ok ? { ok: true, c: data.value, d: data.change, dp: data.percent_change, via: data.via } : null;
-  }catch(e){
-    _nasdaqQuote = null;
+async function refreshRealIndices(){
+  for(const key of ['nasdaq', 'sp500']){
+    try{
+      const res = await fetch(`/api/index/${key}`);
+      const data = await res.json();
+      _realIndexQuotes[key] = data.ok ? { ok: true, c: data.value, d: data.change, dp: data.percent_change, via: data.via } : null;
+    }catch(e){
+      _realIndexQuotes[key] = null;
+    }
   }
 }
 
@@ -567,24 +596,28 @@ function renderIndexStrip(market){
     </span>`;
   }
 
-  function nasdaqSpan(){
-    if(!_nasdaqQuote || !_nasdaqQuote.ok){
-      return `<span class="idx"><span class="name">NASDAQ</span> <span class="val">&mdash;</span></span>`;
+  function realIndexSpan(label, key, fallbackName){
+    const q = _realIndexQuotes[key];
+    if(!q || !q.ok){
+      return `<span class="idx"><span class="name">${label}</span> <span class="val">&mdash;</span></span>`;
     }
-    const up = _nasdaqQuote.d >= 0;
-    const isReal = _nasdaqQuote.via === 'real index';
+    const up = q.d >= 0;
+    const isReal = q.via === 'real index';
     const valStr = isReal
-      ? _nasdaqQuote.c.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})
-      : `$${_nasdaqQuote.c.toFixed(2)}`;
-    const tip = isReal ? `${asOf} \u2014 real Nasdaq Composite index` : `${asOf} \u2014 via ONEQ (Fidelity Nasdaq Composite Index Fund proxy)`;
+      ? q.c.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})
+      : `$${q.c.toFixed(2)}`;
+    const tip = isReal ? `${asOf} \u2014 real ${label} index` : `${asOf} \u2014 via ${fallbackName} (proxy)`;
     return `<span class="idx" title="${tip}">
-      <span class="name">NASDAQ</span>
+      <span class="name">${label}</span>
       <span class="val">${valStr}</span>
-      <span class="chg ${up?'up':'down'}">${up?'+':''}${_nasdaqQuote.dp.toFixed(2)}%</span>
+      <span class="chg ${up?'up':'down'}">${up?'+':''}${q.dp.toFixed(2)}%</span>
     </span>`;
   }
 
-  strip.innerHTML = etfSpan('DOW', 'DIA') + nasdaqSpan() + etfSpan('S&P 500', 'SPY');
+  strip.innerHTML =
+    etfSpan('DOW', 'DIA') +
+    realIndexSpan('NASDAQ', 'nasdaq', 'ONEQ') +
+    realIndexSpan('S&P 500', 'sp500', 'SPY');
 }
 
 async function refreshMacro(){
@@ -642,7 +675,7 @@ function renderMacroValue(elId, entry, formatter){
 // ---------- orchestration ----------
 async function refreshAll(){
   updatedEl.textContent = 'refreshing…';
-  await refreshNasdaqProxy();
+  await refreshRealIndices();
   await Promise.all([refreshStocks(), refreshFearGreed()]);
   updatedEl.textContent = `updated ${new Date().toLocaleTimeString()}`;
   state.secondsLeft = REFRESH_MS/1000;
