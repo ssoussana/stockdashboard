@@ -11,9 +11,6 @@ Setup:
     export TWELVE_DATA_API_KEY="your-key-here"   (optional, powers the SMA/RSI line and
         after-hours prices — free at twelvedata.com, no card required. Without it,
         those sections just show "n/a".)
-    export FMP_API_KEY="your-key-here"           (optional, powers the market-movers
-        list — free at financialmodelingprep.com, no card required. Without it, that
-        section is just empty.)
     export FRED_API_KEY="your-key-here"           (optional, powers real crude oil
         $/barrel and 10Y Treasury yield — free at fredaccount.stlouisfed.org, no
         card required, no paid tiers at all. Without it, that section is empty.)
@@ -46,9 +43,6 @@ if not API_KEY:
 # Optional — only needed for the SMA feature. If unset, /api/sma just
 # reports every symbol as unavailable instead of crashing the whole app.
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
-
-# Optional — only needed for the market-movers (gainers/losers) list.
-FMP_API_KEY = os.environ.get("FMP_API_KEY")
 
 # Optional — only needed for real crude oil/treasury-yield data.
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
@@ -787,71 +781,69 @@ threading.Thread(target=_sp500_background_loop, daemon=True).start()
 
 # ---------- Market movers (top gainers/losers, computed from S&P 500
 # constituents directly — not tied to the watchlist) ----------
-# Previously this filtered FMP's whole-market "biggest movers" feed down
-# to S&P 500 names, but that combination is usually near-empty: FMP's
-# whole-market movers are dominated by illiquid micro-caps/SPACs with
-# 100-300%+ single-day swings, and S&P 500 blue-chips essentially never
-# move anywhere close to that much — so the intersection of the two
-# lists is frequently zero. This fetches quotes for the S&P 500
-# constituents directly (batched, since 503 symbols is too many for one
-# request) and computes the actual top 5 gainers/losers ourselves.
+# Previously tried FMP's whole-market "biggest movers" feed filtered to
+# S&P 500 (near-empty — blue-chips rarely make "biggest % movers" lists
+# dominated by micro-caps), then FMP's batch-quote endpoint (requires a
+# paid $59/mo Premium plan). This uses Finnhub instead — the same
+# provider (and the same fetch_quote_one/_quote_executor/_quote_cache)
+# already powering the watchlist — so it costs nothing extra, and any
+# symbol that's in both the watchlist and S&P 500 (e.g. NVDA, PLTR,
+# HOOD) is a cache hit here instead of a duplicate API call.
 #
-# Refresh cadence is slower (every 30 min, market hours +/- 15min only —
-# reuses is_crude_oil_hours()'s window since it's the same "trading day"
-# concept) than the old 15-min whole-market pull, because fetching all
-# S&P 500 quotes costs several API calls per refresh instead of 2.
+# Finnhub's free tier is 60 calls/minute. This paces the 503-symbol
+# sweep in batches of MOVERS_SP500_PACE_PER_MIN per minute rather than
+# firing them all at once, deliberately leaving headroom: even if the
+# watchlist grows to ~25 symbols (current + 10ish more), combined usage
+# stays comfortably under 60/min. At 25/min the full sweep takes ~20
+# minutes, well inside the 30-minute refresh cadence.
 MOVERS_CACHE_SECONDS = 30 * 60
-MOVERS_CHUNK_SIZE = 100  # symbols per batch-quote call — stays well under any URL length limit
+MOVERS_SP500_PACE_PER_MIN = 25
 _movers_cache = load_json_cache("movers_cache.json") or {"data": None, "ts": 0}
 _movers_status = {"last_attempt": None, "last_error": None}
 
 
-def _fetch_sp500_batch_quotes_raw():
+def fetch_sp500_quotes_paced():
     symbols = sorted(get_sp500_symbols())
     quotes = []
-    for i in range(0, len(symbols), MOVERS_CHUNK_SIZE):
-        chunk = symbols[i:i + MOVERS_CHUNK_SIZE]
-        r = _http.get(
-            "https://financialmodelingprep.com/stable/batch-quote",
-            params={"symbols": ",".join(chunk), "apikey": FMP_API_KEY},
-            timeout=(5, 20),
-        )
-        if r.text.lstrip().startswith("<"):
-            raise ValueError(f"got HTML instead of JSON (likely blocked) — first 150 chars: {r.text[:150]!r}")
-        if r.status_code == 402:
-            raise ValueError("402 Payment Required — batch-quote requires a paid FMP plan")
-        r.raise_for_status()
-        data = r.json()
-        if not isinstance(data, list):
-            raise ValueError(f"unexpected response shape for chunk starting {chunk[0]}: {str(data)[:150]}")
-        quotes.extend(data)
+    for i in range(0, len(symbols), MOVERS_SP500_PACE_PER_MIN):
+        batch_start = time.time()
+        batch = symbols[i:i + MOVERS_SP500_PACE_PER_MIN]
+
+        # Cache hits (e.g. symbols also on the watchlist, already fetched
+        # this minute) don't count against pacing — only symbols we
+        # actually need to hit Finnhub for do.
+        to_fetch = []
+        for sym in batch:
+            cached = get_quote_cached(sym)
+            if cached is not None:
+                if cached.get("ok"):
+                    quotes.append({"symbol": sym, **cached})
+            else:
+                to_fetch.append(sym)
+
+        if to_fetch:
+            results = list(_quote_executor.map(fetch_quote_one, to_fetch))
+            now = time.time()
+            for sym, data in zip(to_fetch, results):
+                _quote_cache[sym] = {"data": data, "ts": now}
+                if data.get("ok"):
+                    quotes.append({"symbol": sym, **data})
+            save_json_cache("quote_cache.json", _quote_cache)
+
+        is_last_batch = (i + MOVERS_SP500_PACE_PER_MIN) >= len(symbols)
+        if not is_last_batch:
+            elapsed = time.time() - batch_start
+            remaining = 60 - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
     return quotes
-
-
-_movers_fetch_executor = ThreadPoolExecutor(max_workers=4)  # more than 1 —
-    # result(timeout=...) abandons a stuck call from the caller's side but
-    # doesn't kill the underlying thread, so a genuinely-hung request would
-    # otherwise permanently occupy the only worker and block every future
-    # attempt from ever getting a fresh connection
-
-
-def fetch_sp500_batch_quotes():
-    """Wraps the raw fetch with a hard-enforced 40s timeout from the
-    OUTSIDE (longer than the old single-call 25s, since this is several
-    chunked calls) — see fetch_movers_list's old docstring for why a
-    requests-level timeout alone isn't reliable enough on this host."""
-    future = _movers_fetch_executor.submit(_fetch_sp500_batch_quotes_raw)
-    try:
-        return future.result(timeout=40)
-    except FutureTimeoutError:
-        raise TimeoutError("batch-quote fetch hard-timed-out after 40s (likely a DNS/network hang)")
 
 
 def fetch_movers_all():
     _movers_status["last_attempt"] = time.time()
-    print("[movers] requesting S&P 500 batch quotes", flush=True)
+    print("[movers] requesting S&P 500 quotes via Finnhub (paced sweep)", flush=True)
     try:
-        quotes = fetch_sp500_batch_quotes()
+        quotes = fetch_sp500_quotes_paced()
     except Exception as e:
         _movers_status["last_error"] = str(e)
         print(f"[movers] fetch failed: {e!r}", flush=True)
@@ -859,16 +851,17 @@ def fetch_movers_all():
 
     valid = []
     for q in quotes:
-        symbol = q.get("symbol")
-        price = q.get("price")
-        pct = q.get("changesPercentage", q.get("changePercentage"))
-        if symbol is None or price is None or pct is None:
+        price = q.get("c")
+        pct = q.get("dp")
+        if price is None or pct is None:
             continue
         valid.append({
-            "symbol": symbol,
-            "name": q.get("name") or symbol,
+            "symbol": q["symbol"],
+            # Finnhub's quote endpoint doesn't return a company name —
+            # the ticker itself is what's shown.
+            "name": q["symbol"],
             "price": price,
-            "change": q.get("change"),
+            "change": q.get("d"),
             "changesPercentage": pct,
         })
 
@@ -885,8 +878,6 @@ def fetch_movers_all():
 
 @app.route("/api/movers")
 def movers():
-    if not FMP_API_KEY:
-        return jsonify({"error": "FMP_API_KEY not set", "gainers": [], "losers": []})
     if _movers_cache["data"] is None:
         return jsonify({"error": "not fetched yet", "gainers": [], "losers": []})
     return jsonify(_movers_cache["data"])
@@ -895,15 +886,15 @@ def movers():
 @app.route("/api/debug/movers")
 def movers_debug():
     return jsonify({
-        "fmp_key_set": bool(FMP_API_KEY),
         "cache_seconds_old": round(time.time() - _movers_cache["ts"], 1) if _movers_cache["data"] else None,
         "cached_data": _movers_cache["data"],
         "last_attempt_seconds_ago": round(time.time() - _movers_status["last_attempt"], 1) if _movers_status["last_attempt"] else None,
         "last_error": _movers_status["last_error"],
         "process_id": os.getpid(),
         "process_uptime_seconds": round(time.time() - _process_started_at, 1),
-        "source": "S&P 500 batch-quote (computed directly, not filtered whole-market feed)",
+        "source": "S&P 500 quotes via Finnhub (paced sweep, shares cache with watchlist)",
         "sp500_constituent_count": len(get_sp500_symbols()),
+        "pace_per_minute": MOVERS_SP500_PACE_PER_MIN,
     })
 
 
@@ -912,26 +903,28 @@ def _movers_background_loop():
     time.sleep(5)  # staggered so background threads don't all burst-fetch
                    # simultaneously at boot, competing for this host's 0.5 CPU
 
-    # Pull immediately on boot regardless of market hours, so a redeploy
-    # doesn't leave movers sitting on stale/empty data until the next
-    # scheduled window (matches the convention used by the index/gold
-    # background loops).
-    if FMP_API_KEY:
+    # Pull immediately on boot if currently within market hours, so a
+    # redeploy during the trading day doesn't leave movers sitting on
+    # stale data until the next scheduled window. Unlike the index/gold
+    # loops' immediate-fetch (a single cheap call), this one is a full
+    # ~500-call paced sweep — not worth running on a redeploy at 2am
+    # when prices aren't moving anyway, so it's gated by market hours
+    # here rather than being truly unconditional.
+    if is_market_hours_with_buffer():
         try:
             fetch_movers_all()
         except Exception as e:
             print(f"[movers] initial fetch raised: {e!r}", flush=True)
 
     while True:
-        # Reuses is_crude_oil_hours()'s market-hours +/-15min window — same
-        # "is the trading day meaningfully active" concept applies here.
-        if FMP_API_KEY and is_crude_oil_hours():
+        # Same market-hours +/-15min window already used to gate regular
+        # watchlist quote fetching — no point sweeping 503 symbols for
+        # prices that aren't moving outside trading hours.
+        if is_market_hours_with_buffer():
             try:
                 fetch_movers_all()
             except Exception as e:
                 print(f"[movers] fetch_movers_all raised: {e!r}", flush=True)
-            sleep_s = MOVERS_CACHE_SECONDS
-        elif not FMP_API_KEY:
             sleep_s = MOVERS_CACHE_SECONDS
         else:
             print("[movers] outside movers update window, skipping", flush=True)
