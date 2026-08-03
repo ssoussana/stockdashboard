@@ -1061,6 +1061,67 @@ def _gold_background_loop():
 threading.Thread(target=_gold_background_loop, daemon=True).start()
 
 
+# ---------- Market sentiment (Fear & Greed) ----------
+# Previously fetched directly from the browser on every refresh, with no
+# way to confirm whether a frozen-looking score was genuinely stale or a
+# client-side/CDN caching artifact. Proxying it server-side, the same way
+# gold/indices already work, gives us a real cache timestamp and a debug
+# endpoint to actually verify freshness.
+FEAR_GREED_CACHE_SECONDS = 15 * 60  # matches feargreedchart.com's own stated server-side cache window
+_fear_greed_cache = load_json_cache("fear_greed_cache.json")
+_fear_greed_status = {"last_attempt": None, "last_error": None}
+
+
+def fetch_fear_greed():
+    _fear_greed_status["last_attempt"] = time.time()
+    try:
+        r = _http.get("https://feargreedchart.com/api/?action=all", timeout=(5, 15))
+        r.raise_for_status()
+        data = r.json()
+        _fear_greed_cache["data"] = data
+        _fear_greed_cache["ts"] = time.time()
+        save_json_cache("fear_greed_cache.json", _fear_greed_cache)
+        _fear_greed_status["last_error"] = None
+        score = (data.get("score") or {}).get("score")
+        print(f"[fear_greed] updated: score={score}", flush=True)
+    except Exception as e:
+        _fear_greed_status["last_error"] = str(e)
+        print(f"[fear_greed] fetch failed: {e!r}", flush=True)
+        raise
+
+
+@app.route("/api/fear-greed")
+def fear_greed():
+    if _fear_greed_cache.get("data") is None:
+        return jsonify({"ok": False, "error": "not fetched yet"})
+    return jsonify(_fear_greed_cache["data"])
+
+
+@app.route("/api/debug/fear-greed")
+def fear_greed_debug():
+    cached = _fear_greed_cache.get("data")
+    return jsonify({
+        "cache_seconds_old": round(time.time() - _fear_greed_cache["ts"], 1) if cached else None,
+        "cached_score": (cached.get("score") or {}).get("score") if cached else None,
+        "last_attempt_seconds_ago": round(time.time() - _fear_greed_status["last_attempt"], 1) if _fear_greed_status["last_attempt"] else None,
+        "last_error": _fear_greed_status["last_error"],
+    })
+
+
+def _fear_greed_background_loop():
+    print("[fear_greed] background thread started", flush=True)
+    time.sleep(24)  # staggered — see movers loop comment
+    while True:
+        try:
+            fetch_fear_greed()
+        except Exception as e:
+            print(f"[fear_greed] fetch_fear_greed raised: {e!r}", flush=True)
+        time.sleep(FEAR_GREED_CACHE_SECONDS)
+
+
+threading.Thread(target=_fear_greed_background_loop, daemon=True).start()
+
+
 # ---------- Fed calendar: next CPI, next PPI, next FOMC meeting ----------
 FED_CACHE_SECONDS = 24 * 60 * 60  # these schedules don't change intraday
 _fed_cache = load_json_cache("fed_cache.json")
@@ -1301,6 +1362,22 @@ def next_market_open_et(now_et=None):
     return candidate
 
 
+def is_crude_oil_hours():
+    """Crude oil update window: 15 minutes before NYSE open through 15
+    minutes after NYSE close (9:15am-4:15pm ET, Mon-Fri). WTI futures
+    actually trade nearly around the clock, but Steve only uses the
+    dashboard during/near stock market hours, so there's no value in
+    tracking crude oil's overnight session — and staying inside this
+    narrower window keeps us comfortably within the 100/month quota (see
+    REAL_INDEX_CADENCE_SECONDS below). Approximation — doesn't account for
+    market holidays."""
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    if now_et.weekday() >= 5:  # Sat=5, Sun=6
+        return False
+    t = now_et.time()
+    return dt_time(9, 15) <= t < dt_time(16, 15)
+
+
 # Real index values via RapidAPI. Dow and Nasdaq share one listing
 # ("live-stock-market"); S&P 500 has its own separate listing
 # ("yahoo-finance-real-time1") to itself — confirmed via live tests
@@ -1452,12 +1529,13 @@ REAL_INDEX_SOURCES = {
 #   (43min+43min+91min ~= 470/mo combined)
 # - S&P has "yahoo-finance-real-time1" to itself (20min ~= 410/mo)
 # - Crude Oil has its own dedicated "yahoo-finance127" quota, just
-#   100/mo (90min ~= 91/mo)
+#   100/mo — window is 9:15am-4:15pm ET (~7hrs/day, ~152hrs/mo);
+#   95min ~= 96/mo, just under quota
 REAL_INDEX_CADENCE_SECONDS = {
     "dow": 43 * 60,
     "nasdaq": 43 * 60,
     "sp500": 20 * 60,
-    "crude_oil": 90 * 60,
+    "crude_oil": 95 * 60,
     "treasury_10y": 91 * 60,
 }
 _index_caches_loaded = load_json_cache("indices_cache.json")
@@ -1578,10 +1656,54 @@ def _make_index_background_loop(key, stagger_seconds):
     return loop
 
 
+def _make_commodity_background_loop(key, stagger_seconds):
+    """Same quick-retry logic as _make_index_background_loop, but gated on
+    is_crude_oil_hours() (market hours +/- 15min) instead of the raw
+    9:30am-4pm ET window, and sleeps efficiently until the next window
+    opens rather than polling repeatedly overnight."""
+    def loop():
+        print(f"[{key}] background thread started", flush=True)
+        time.sleep(stagger_seconds)
+
+        try:
+            fetch_index_all(key)
+        except Exception as e:
+            print(f"[{key}] initial fetch raised: {e!r}", flush=True)
+
+        while True:
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+            if is_crude_oil_hours():
+                try:
+                    fetch_index_all(key)
+                except Exception as e:
+                    print(f"[{key}] fetch_index_all raised: {e!r}", flush=True)
+
+                failed = _index_status[key]["last_error"] is not None
+                if failed:
+                    _index_consecutive_failures[key] += 1
+                else:
+                    _index_consecutive_failures[key] = 0
+
+                if failed and _index_consecutive_failures[key] <= INDEX_MAX_QUICK_RETRIES:
+                    sleep_s = INDEX_RETRY_DELAY_SECONDS
+                else:
+                    sleep_s = REAL_INDEX_CADENCE_SECONDS[key]
+            else:
+                print(f"[{key}] outside crude oil update window, skipping", flush=True)
+                # Sleep until 15 min before the next market open (i.e. the
+                # start of the next window), capped so we don't oversleep
+                # past it or needlessly poll all night/weekend.
+                next_window_open = next_market_open_et(now_et) - timedelta(minutes=15)
+                minutes_to_open = (next_window_open - now_et).total_seconds() / 60
+                sleep_s = min(max(minutes_to_open, 1) * 60, 30 * 60)
+            time.sleep(sleep_s)
+    return loop
+
+
 threading.Thread(target=_make_index_background_loop("nasdaq", 8), daemon=True).start()
 threading.Thread(target=_make_index_background_loop("sp500", 14), daemon=True).start()
 threading.Thread(target=_make_index_background_loop("dow", 20), daemon=True).start()
-threading.Thread(target=_make_index_background_loop("crude_oil", 26), daemon=True).start()
+threading.Thread(target=_make_commodity_background_loop("crude_oil", 26), daemon=True).start()
 threading.Thread(target=_make_index_background_loop("treasury_10y", 32), daemon=True).start()
 
 
