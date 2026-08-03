@@ -1987,19 +1987,22 @@ def test_fmp_market_hours():
 def test_fmp_index_quote():
     if not FMP_API_KEY:
         return jsonify({"error": "FMP_API_KEY not set"})
-    try:
-        r = _http.get(
-            "https://financialmodelingprep.com/stable/quote",
-            params={"symbol": "^GSPC", "apikey": FMP_API_KEY},
-            timeout=(5, 15),
-        )
-        return jsonify({
-            "status_code": r.status_code,
-            "is_html_block_page": r.text.lstrip().startswith("<"),
-            "raw_response": r.text[:1000],
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    results = {}
+    for symbol in ["^GSPC", "^DJI", "^IXIC", "^TNX", "CLUSD", "CL=F", "USOUSD"]:
+        try:
+            r = _http.get(
+                "https://financialmodelingprep.com/stable/quote",
+                params={"symbol": symbol, "apikey": FMP_API_KEY},
+                timeout=(5, 15),
+            )
+            results[symbol] = {
+                "status_code": r.status_code,
+                "is_html_block_page": r.text.lstrip().startswith("<"),
+                "raw_response": r.text[:500],
+            }
+        except Exception as e:
+            results[symbol] = {"error": str(e)}
+    return jsonify(results)
 
 
 if __name__ == "__main__":
