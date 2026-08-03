@@ -213,6 +213,40 @@ def index():
     return send_from_directory(".", "dashboard.html")
 
 
+# ---------- PWA (installable "Market Pulse" app on Android) ----------
+@app.route("/manifest.json")
+def pwa_manifest():
+    return send_from_directory(".", "manifest.json", mimetype="application/manifest+json")
+
+
+@app.route("/service-worker.js")
+def pwa_service_worker():
+    # Root-scoped (not under /static/) so its default scope covers the
+    # whole site — a service worker can only control paths at or below
+    # wherever it's served from.
+    return send_from_directory(".", "service-worker.js", mimetype="application/javascript")
+
+
+@app.route("/icon-192.png")
+def pwa_icon_192():
+    return send_from_directory(".", "icon-192.png", mimetype="image/png")
+
+
+@app.route("/icon-512.png")
+def pwa_icon_512():
+    return send_from_directory(".", "icon-512.png", mimetype="image/png")
+
+
+@app.route("/icon-192-maskable.png")
+def pwa_icon_192_maskable():
+    return send_from_directory(".", "icon-192-maskable.png", mimetype="image/png")
+
+
+@app.route("/icon-512-maskable.png")
+def pwa_icon_512_maskable():
+    return send_from_directory(".", "icon-512-maskable.png", mimetype="image/png")
+
+
 def fetch_quote_one(sym):
     try:
         r = _http.get(
@@ -1254,6 +1288,37 @@ _pe_executor = ThreadPoolExecutor(max_workers=2)  # same conservative
 PE_RETRY_DELAY_SECONDS = 10 * 60
 PE_MAX_QUICK_RETRIES = 2
 
+# Rolling history so we can compute week-over-week P/E change (used to
+# color-code valuation trend rather than absolute level) — same pattern
+# already used for gold's 24h change. Since PE is only fetched once a
+# day, one entry accumulates per day; kept a few days past a week for
+# buffer so there's always a data point at-or-before the 7-day mark.
+PE_HISTORY_FILE = "pe_history.json"
+PE_HISTORY_MAX_AGE = 10 * 24 * 60 * 60
+_pe_history = load_json_cache(PE_HISTORY_FILE)  # symbol -> [{"pe": x, "ts": ...}, ...]
+
+
+def compute_pe_week_change(sym, current_pe, now):
+    """% change from the P/E reading closest to (but not after) 7 days
+    ago, to today's. Returns None if we don't have anything old enough
+    yet (e.g. the first week after this feature was added)."""
+    history = _pe_history.get(sym, [])
+    target = now - 7 * 24 * 60 * 60
+    candidates = [h for h in history if h["ts"] <= target]
+    if not candidates:
+        return None
+    closest = max(candidates, key=lambda h: h["ts"])
+    old_pe = closest.get("pe")
+    if not old_pe:
+        return None
+    return round((current_pe - old_pe) / old_pe * 100, 1)
+
+
+def record_pe_history(sym, pe_value, now):
+    hist = _pe_history.setdefault(sym, [])
+    hist.append({"pe": pe_value, "ts": now})
+    _pe_history[sym] = [h for h in hist if now - h["ts"] <= PE_HISTORY_MAX_AGE]
+
 
 def fetch_pe_one(sym, _retry=True):
     """Trailing-twelve-month P/E via Finnhub's company-fundamentals
@@ -1287,8 +1352,13 @@ def fetch_pe_immediate(sym):
     """One-off fetch for a brand-new watchlist symbol, so it doesn't
     wait for the next scheduled daily pass."""
     print(f"[pe] immediate fetch for new symbol {sym}", flush=True)
+    now = time.time()
     data = fetch_pe_one(sym)
-    _pe_cache[sym] = {"data": data, "ts": time.time()}
+    if data.get("ok") and data.get("pe") is not None:
+        data["week_change_pct"] = compute_pe_week_change(sym, data["pe"], now)
+        record_pe_history(sym, data["pe"], now)
+        save_json_cache(PE_HISTORY_FILE, _pe_history)
+    _pe_cache[sym] = {"data": data, "ts": now}
     save_json_cache(PE_CACHE_FILE, _pe_cache)
 
 
@@ -1298,10 +1368,14 @@ def fetch_pe_all(symbols):
     now = time.time()
     ok_count = 0
     for sym, data in zip(symbols, results):
+        if data.get("ok") and data.get("pe") is not None:
+            data["week_change_pct"] = compute_pe_week_change(sym, data["pe"], now)
+            record_pe_history(sym, data["pe"], now)
         _pe_cache[sym] = {"data": data, "ts": now}
         if data.get("ok"):
             ok_count += 1
     save_json_cache(PE_CACHE_FILE, _pe_cache)
+    save_json_cache(PE_HISTORY_FILE, _pe_history)
     print(f"[pe] pass complete ({ok_count}/{len(symbols)} ok)", flush=True)
     return ok_count, len(symbols)
 
@@ -1320,11 +1394,13 @@ def pe():
 @app.route("/api/debug/pe")
 def pe_debug():
     ages = {sym: round(time.time() - e["ts"], 1) for sym, e in _pe_cache.items()}
+    history_summary = {sym: len(entries) for sym, entries in _pe_history.items()}
     return jsonify({
         "finnhub_key_set": bool(API_KEY),
         "known_symbols_active": active_known_symbols(),
         "cache_seconds_old": ages,
         "cached_data": {sym: e["data"] for sym, e in _pe_cache.items()},
+        "history_entry_counts": history_summary,
     })
 
 

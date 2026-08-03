@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Market Pulse</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0a0c10">
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -913,12 +917,23 @@ async function refreshPE(){
       if(!(info && info.ok && info.pe != null)){
         el.textContent = '';
         el.className = 'pe-ratio';
+        el.title = '';
         return;
       }
       const pe = info.pe;
-      const tier = pe <= 30 ? 'pe-low' : pe <= 55 ? 'pe-healthy' : pe <= 65 ? 'pe-high' : 'pe-extreme';
+      const chg = info.week_change_pct;
       el.textContent = `(PE ${pe.toFixed(1)})`;
+      if(chg == null){
+        // Not enough history yet to know the week-over-week trend
+        // (e.g. this feature hasn't been tracking this symbol for a
+        // full week yet) — show the number plain rather than color it.
+        el.className = 'pe-ratio';
+        el.title = 'Week-over-week change not available yet';
+        return;
+      }
+      const tier = chg <= -10 ? 'pe-low' : chg <= 10 ? 'pe-healthy' : chg <= 25 ? 'pe-high' : 'pe-extreme';
       el.className = `pe-ratio ${tier}`;
+      el.title = `${chg >= 0 ? '+' : ''}${chg.toFixed(1)}% vs 1 week ago`;
     });
   }catch(e){ /* non-fatal — PE labels just stay blank */ }
 }
@@ -1017,6 +1032,15 @@ function updateActive(opts){
 document.addEventListener('click', (e) => {
   if(!e.target.closest('.add-box')) closeSuggestions();
 });
+
+if('serviceWorker' in navigator){
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker.js').catch(() => {
+      // Non-fatal — the site still works as a normal page if this fails,
+      // it just won't be installable as a standalone app.
+    });
+  });
+}
 
 (async function init(){
   SYMBOLS = await loadSharedWatchlist();
