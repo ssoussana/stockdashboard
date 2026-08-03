@@ -147,6 +147,9 @@
   .sym-link{color:inherit;text-decoration:none;}
   .sym-link:hover{text-decoration:underline;color:var(--amber);}
   .sym-link:focus-visible{outline:2px solid var(--amber);outline-offset:2px;}
+  .trade-link{color:var(--green);text-decoration:none;font-size:12px;margin-left:4px;opacity:.7;}
+  .trade-link:hover{opacity:1;text-decoration:none;}
+  .trade-link:focus-visible{outline:2px solid var(--amber);outline-offset:2px;}
   .row1-right{display:flex;align-items:center;gap:8px;}
   .remove-btn{
     background:none;border:none;color:var(--muted-dim);font-family:var(--mono);
@@ -291,7 +294,7 @@ function buildCards(){
     <div class="card" id="card-${sym}">
       <div class="bar"></div>
       <div class="row1">
-        <span class="sym">${symLink(sym)}</span>
+        <span class="sym">${symLink(sym)}${tradeLink(sym)}</span>
         <div class="row1-right">
           <span class="status-pill" id="pill-${sym}"></span>
           <button class="remove-btn" data-sym="${sym}" title="Remove ${sym}" aria-label="Remove ${sym}">&times;</button>
@@ -680,7 +683,7 @@ function renderMoversList(containerId, items, error){
     const up = pct >= 0;
     const pctStr = pct != null ? `${up?'+':''}${pct.toFixed(2)}%` : '&mdash;';
     return `<div class="movers-row">
-      <span><span class="sym">${symLink(m.symbol)}</span><span class="name">${m.name || ''}</span></span>
+      <span><span class="sym">${symLink(m.symbol)}${tradeLink(m.symbol)}</span><span class="name">${m.name || ''}</span></span>
       <span class="pct ${up?'up':'down'}">${pctStr}</span>
     </div>`;
   }).join('');
@@ -701,6 +704,15 @@ async function refreshMovers(){
 // ---------- Upcoming earnings ----------
 function symLink(sym){
   return `<a href="https://finance.yahoo.com/quote/${encodeURIComponent(sym)}" target="_blank" rel="noopener noreferrer" class="sym-link">${sym}</a>`;
+}
+
+function tradeLink(sym){
+  // Small separate icon next to the symbol — goes straight to E*TRADE's
+  // quote/trade page for one-click access from Steve's own brokerage.
+  // Kept apart from symLink() so the main symbol text still points to
+  // Yahoo (works for anyone viewing, including Steve's friend, who may
+  // not have an E*TRADE account).
+  return `<a href="https://us.etrade.com/etx/mkt/quotes?symbol=${encodeURIComponent(sym)}" target="_blank" rel="noopener noreferrer" class="trade-link" title="Trade ${sym} on E*TRADE">&#8599;</a>`;
 }
 
 function fmtRevenue(v){
@@ -838,7 +850,7 @@ async function refreshEarnings(){
 
         return `<div class="earn-row">
           <div class="movers-row" style="border-bottom:none;padding-bottom:2px;">
-            <span><span class="sym">${symLink(sym)}</span><span class="name">Reported ${dateStr}</span></span>
+            <span><span class="sym">${symLink(sym)}${tradeLink(sym)}</span><span class="name">Reported ${dateStr}</span></span>
           </div>
           <div class="earn-stats">${epsChip}${revChip}</div>
         </div>`;
@@ -847,7 +859,7 @@ async function refreshEarnings(){
       const daysAway = Math.round((date - today) / 86400000);
       const when = daysAway === 0 ? 'today' : daysAway === 1 ? 'tomorrow' : `in ${daysAway}d`;
       return `<div class="movers-row">
-        <span><span class="sym">${symLink(sym)}</span><span class="name">${dateStr}${info.hour && hourLabel[info.hour] ? ' · '+hourLabel[info.hour] : ''}</span></span>
+        <span><span class="sym">${symLink(sym)}${tradeLink(sym)}</span><span class="name">${dateStr}${info.hour && hourLabel[info.hour] ? ' · '+hourLabel[info.hour] : ''}</span></span>
         <span class="pct">${when}</span>
       </div>`;
     }).join('');
