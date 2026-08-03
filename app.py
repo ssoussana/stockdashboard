@@ -809,42 +809,58 @@ MOVERS_SP500_PACE_PER_MIN = 25
 _movers_cache = load_json_cache("movers_cache.json") or {"data": None, "ts": 0}
 _movers_status = {"last_attempt": None, "last_error": None}
 
+# Set for the duration of the ~20min movers sweep. The earnings loop's
+# once-daily burst (4 simultaneous Finnhub calls) collided with this
+# sweep on a redeploy — the burst's short 6s timeouts starved on this
+# host's 0.5 CPU while movers was mid-sweep, poisoning the earnings
+# cache with timeout errors for the rest of that day. Earnings checks
+# this before firing its burst and waits it out rather than colliding.
+# Regular per-symbol watchlist quote fetching deliberately does NOT
+# check this — those are individually paced already and coexist fine
+# with the sweep, and blocking the live UI's quotes behind a ~20min
+# flag would be a much worse regression than the original problem.
+_movers_sweep_active = threading.Event()
+
 
 def fetch_sp500_quotes_paced():
-    symbols = sorted(get_sp500_symbols())
-    quotes = []
-    for i in range(0, len(symbols), MOVERS_SP500_PACE_PER_MIN):
-        batch_start = time.time()
-        batch = symbols[i:i + MOVERS_SP500_PACE_PER_MIN]
+    _movers_sweep_active.set()
+    try:
+        symbols = sorted(get_sp500_symbols())
+        quotes = []
+        for i in range(0, len(symbols), MOVERS_SP500_PACE_PER_MIN):
+            batch_start = time.time()
+            batch = symbols[i:i + MOVERS_SP500_PACE_PER_MIN]
 
-        # Cache hits (e.g. symbols also on the watchlist, already fetched
-        # this minute) don't count against pacing — only symbols we
-        # actually need to hit Finnhub for do.
-        to_fetch = []
-        for sym in batch:
-            cached = get_quote_cached(sym)
-            if cached is not None:
-                if cached.get("ok"):
-                    quotes.append({"symbol": sym, **cached})
-            else:
-                to_fetch.append(sym)
+            # Cache hits (e.g. symbols also on the watchlist, already fetched
+            # this minute) don't count against pacing — only symbols we
+            # actually need to hit Finnhub for do.
+            to_fetch = []
+            for sym in batch:
+                cached = get_quote_cached(sym)
+                if cached is not None:
+                    if cached.get("ok"):
+                        quotes.append({"symbol": sym, **cached})
+                else:
+                    to_fetch.append(sym)
 
-        if to_fetch:
-            results = list(_quote_executor.map(fetch_quote_one, to_fetch))
-            now = time.time()
-            for sym, data in zip(to_fetch, results):
-                _quote_cache[sym] = {"data": data, "ts": now}
-                if data.get("ok"):
-                    quotes.append({"symbol": sym, **data})
-            save_json_cache("quote_cache.json", _quote_cache)
+            if to_fetch:
+                results = list(_quote_executor.map(fetch_quote_one, to_fetch))
+                now = time.time()
+                for sym, data in zip(to_fetch, results):
+                    _quote_cache[sym] = {"data": data, "ts": now}
+                    if data.get("ok"):
+                        quotes.append({"symbol": sym, **data})
+                save_json_cache("quote_cache.json", _quote_cache)
 
-        is_last_batch = (i + MOVERS_SP500_PACE_PER_MIN) >= len(symbols)
-        if not is_last_batch:
-            elapsed = time.time() - batch_start
-            remaining = 60 - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
-    return quotes
+            is_last_batch = (i + MOVERS_SP500_PACE_PER_MIN) >= len(symbols)
+            if not is_last_batch:
+                elapsed = time.time() - batch_start
+                remaining = 60 - elapsed
+                if remaining > 0:
+                    time.sleep(remaining)
+        return quotes
+    finally:
+        _movers_sweep_active.clear()
 
 
 def fetch_movers_all():
@@ -1165,6 +1181,17 @@ def _earnings_background_loop():
     time.sleep(15)  # staggered — see movers loop comment. This one's the
                      # heaviest burst (4 parallel workers), so it goes last.
     while True:
+        # Defer to an in-progress movers sweep (~20min of steady Finnhub
+        # traffic) rather than firing 4 simultaneous calls into it — that
+        # collision previously starved earnings' short 6s timeouts and
+        # poisoned the cache with errors for a full day. Capped wait so a
+        # stuck/hung sweep can't block earnings indefinitely.
+        waited = 0
+        while _movers_sweep_active.is_set() and waited < 25 * 60:
+            print("[earnings] movers sweep in progress, waiting...", flush=True)
+            time.sleep(30)
+            waited += 30
+
         try:
             fetch_earnings_all(active_known_symbols())
         except Exception as e:
