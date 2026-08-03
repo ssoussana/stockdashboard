@@ -105,7 +105,6 @@ _process_started_at = time.time()
 _http = requests.Session()
 
 CACHE_SECONDS = 60  # per-symbol, shared across all visitors requesting that symbol
-_quote_cache = {}   # symbol -> {"data": {...}, "ts": float}
 
 
 def load_json_cache(filename):
@@ -132,6 +131,8 @@ def save_json_cache(filename, data):
     except Exception as e:
         print(f"[cache] failed to save {path}: {e!r}", flush=True)
 
+
+_quote_cache = load_json_cache("quote_cache.json")   # symbol -> {"data": {...}, "ts": float}
 
 # SMA is daily data, doesn't need to update every minute — cache it longer.
 # Loaded from disk at startup so a fresh deploy shows the last known values
@@ -235,6 +236,18 @@ _quote_executor = ThreadPoolExecutor(max_workers=4)  # reduced from 8 — fewer
                                                        # watchlist sizes
 
 
+def is_market_hours_with_buffer(buffer_minutes=15):
+    """Same as is_regular_market_hours but widened by a buffer on each
+    side — used to gate live stock quote fetching specifically, so it
+    starts a little before open and keeps going a little after close."""
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    if now_et.weekday() >= 5:
+        return False
+    start = (datetime.combine(now_et.date(), dt_time(9, 30)) - timedelta(minutes=buffer_minutes)).time()
+    end = (datetime.combine(now_et.date(), dt_time(16, 0)) + timedelta(minutes=buffer_minutes)).time()
+    return start <= now_et.time() < end
+
+
 def get_quote_cached(sym):
     entry = _quote_cache.get(sym)
     if entry and (time.time() - entry["ts"]) < CACHE_SECONDS:
@@ -292,15 +305,27 @@ def quotes():
             to_fetch.append(sym)
 
     if to_fetch:
-        # Fetch cache misses concurrently rather than one at a time — with
-        # a growing watchlist, sequential fetching was slow enough to trip
-        # the host's request timeout and crash the worker mid-request,
-        # wiping other in-memory data (including SMA/RSI) along with it.
-        results = list(_quote_executor.map(fetch_quote_one, to_fetch))
-        now = time.time()
-        for sym, data in zip(to_fetch, results):
-            _quote_cache[sym] = {"data": data, "ts": now}
-            out[sym] = data
+        if is_market_hours_with_buffer():
+            # Fetch cache misses concurrently rather than one at a time — with
+            # a growing watchlist, sequential fetching was slow enough to trip
+            # the host's request timeout and crash the worker mid-request,
+            # wiping other in-memory data (including SMA/RSI) along with it.
+            results = list(_quote_executor.map(fetch_quote_one, to_fetch))
+            now = time.time()
+            for sym, data in zip(to_fetch, results):
+                _quote_cache[sym] = {"data": data, "ts": now}
+                out[sym] = data
+            save_json_cache("quote_cache.json", _quote_cache)
+        else:
+            # Outside market hours (+/- 15min buffer) — don't spend API
+            # calls on prices that aren't moving. Serve the last known
+            # price if we have one, even if stale, rather than a fresh pull.
+            for sym in to_fetch:
+                stale = _quote_cache.get(sym)
+                if stale:
+                    out[sym] = stale["data"]
+                else:
+                    out[sym] = {"ok": False, "error": "market closed — no cached price yet"}
 
     return jsonify(out)
 
@@ -567,7 +592,7 @@ threading.Thread(target=_sma_background_loop, daemon=True).start()
 # ---------- Market movers (top gainers/losers, whole-market — not tied to
 # the watchlist) ----------
 MOVERS_CACHE_SECONDS = 15 * 60  # FMP free tier: 250 requests/day — keep this gentle
-_movers_cache = {"data": None, "ts": 0}
+_movers_cache = load_json_cache("movers_cache.json") or {"data": None, "ts": 0}
 
 
 def _fetch_movers_list_raw(endpoint):
@@ -634,6 +659,7 @@ def fetch_movers_all():
         raise
     _movers_cache["data"] = {"gainers": gainers, "losers": losers}
     _movers_cache["ts"] = time.time()
+    save_json_cache("movers_cache.json", _movers_cache)
     _movers_status["last_error"] = None
     print(f"[movers] updated: {len(gainers)} gainers, {len(losers)} losers", flush=True)
 
@@ -1262,23 +1288,34 @@ def is_regular_market_hours():
     return dt_time(9, 30) <= t < dt_time(16, 0)
 
 
-# Real index values via RapidAPI's "yahoo-finance-real-time1" listing —
-# confirmed working via live tests (2026-08-02) for both ^IXIC and ^GSPC:
-# the stock/get-options endpoint's response includes a full quote object
-# for the underlying symbol even though it's nominally an options-chain
-# endpoint. Confirmed quoteType "INDEX" — this is the real index, not an
-# ETF proxy. Free tier: 500 requests/month, SHARED across all symbols on
-# this key — cadence below is sized for both indices sharing that budget.
-REAL_INDEX_CACHE_SECONDS = 60 * 60  # hourly per index — two indices at this
-    # cadence during market hours only: ~6.5 checks/day each * ~21 trading
-    # days/month * 2 indices ~= 273/month combined, safely under the
-    # confirmed 500/month shared limit.
-REAL_INDEX_SYMBOLS = {"nasdaq": ("^IXIC", "ONEQ"), "sp500": ("^GSPC", "SPY")}
-_index_caches = {key: {"data": None, "ts": 0} for key in REAL_INDEX_SYMBOLS}
-_index_status = {key: {"last_attempt": None, "last_error": None} for key in REAL_INDEX_SYMBOLS}
+def next_market_open_et(now_et=None):
+    """Next 9:30am ET on a weekday — if today's open already passed (or is
+    currently in progress), rolls to the next weekday. Approximation —
+    doesn't account for market holidays."""
+    now_et = now_et or datetime.now(ZoneInfo("America/New_York"))
+    candidate = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    if candidate <= now_et:
+        candidate += timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
 
 
-def fetch_real_index_quote(yahoo_symbol):
+# Real index values via RapidAPI. Nasdaq and S&P share one listing
+# ("yahoo-finance-real-time1"); Dow uses a DIFFERENT listing
+# ("live-stock-market") specifically so it draws from its own separate
+# 500/month quota rather than competing with the other two — confirmed
+# via live tests (2026-08-03) that all three return real INDEX data, not
+# ETF proxies.
+REAL_INDEX_CACHE_SECONDS = 60 * 60  # hourly per index, during market hours
+    # only. Nasdaq+S&P share one ~500/mo quota (~273/mo combined); Dow has
+    # its own separate ~500/mo quota via the different listing.
+
+
+def fetch_yahoo_realtime1_quote(yahoo_symbol):
+    """Nasdaq/S&P — via the "yahoo-finance-real-time1" listing's
+    stock/get-options endpoint, which includes a full quote object for the
+    underlying symbol even though it's nominally an options-chain endpoint."""
     r = _http.get(
         "https://yahoo-finance-real-time1.p.rapidapi.com/stock/get-options",
         params={"symbol": yahoo_symbol, "lang": "en-US", "region": "US"},
@@ -1301,6 +1338,53 @@ def fetch_real_index_quote(yahoo_symbol):
     return {"ok": True, "value": round(price, 2), "change": round(change, 2), "percent_change": round(percent_change, 2)}
 
 
+def fetch_dow_via_live_stock_market():
+    """Dow — via the "live-stock-market" listing's chart endpoint. This one
+    returns historical OHLC data rather than a simple quote, so change is
+    computed from the last two closing prices ourselves."""
+    r = _http.get(
+        "https://live-stock-market.p.rapidapi.com/v1/index/chart",
+        params={"symbol": "^DJI", "interval": "1d", "range": "5d"},
+        headers={
+            "Content-Type": "application/json",
+            "x-rapidapi-host": "live-stock-market.p.rapidapi.com",
+            "x-rapidapi-key": RAPIDAPI_KEY,
+        },
+        timeout=(5, 15),
+    )
+    r.raise_for_status()
+    payload = r.json()
+    try:
+        # Response is wrapped in an extra {"status":200,"data":{...}} envelope
+        chart_payload = payload.get("data", payload)
+        result = chart_payload["chart"]["result"][0]
+        price = float(result["meta"]["regularMarketPrice"])
+        closes = [c for c in result["indicators"]["quote"][0]["close"] if c is not None]
+        if len(closes) < 2:
+            raise ValueError("not enough close data points to compute change")
+        prev = float(closes[-2])
+        change = price - prev
+        percent_change = (change / prev * 100) if prev else None
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        raise ValueError(f"unexpected response shape: {e!r} — raw: {str(payload)[:200]}")
+    return {
+        "ok": True,
+        "value": round(price, 2),
+        "change": round(change, 2),
+        "percent_change": round(percent_change, 2) if percent_change is not None else None,
+    }
+
+
+REAL_INDEX_SOURCES = {
+    "nasdaq": (lambda: fetch_yahoo_realtime1_quote("^IXIC"), "ONEQ"),
+    "sp500": (lambda: fetch_yahoo_realtime1_quote("^GSPC"), "SPY"),
+    "dow": (fetch_dow_via_live_stock_market, "DIA"),
+}
+_index_caches_loaded = load_json_cache("indices_cache.json")
+_index_caches = {key: _index_caches_loaded.get(key, {"data": None, "ts": 0}) for key in REAL_INDEX_SOURCES}
+_index_status = {key: {"last_attempt": None, "last_error": None} for key in REAL_INDEX_SOURCES}
+
+
 def fetch_etf_fallback(etf_symbol):
     """Fallback — a tracking ETF via Finnhub, same source already used
     elsewhere in the app."""
@@ -1317,13 +1401,13 @@ def fetch_etf_fallback(etf_symbol):
 
 
 def fetch_index_all(key):
-    yahoo_symbol, etf_symbol = REAL_INDEX_SYMBOLS[key]
+    real_fetch_fn, etf_symbol = REAL_INDEX_SOURCES[key]
     status = _index_status[key]
     status["last_attempt"] = time.time()
     result = None
     if RAPIDAPI_KEY:
         try:
-            result = fetch_real_index_quote(yahoo_symbol)
+            result = real_fetch_fn()
             result["via"] = "real index"
             status["last_error"] = None
         except Exception as e:
@@ -1339,12 +1423,13 @@ def fetch_index_all(key):
                 status["last_error"] = str(e)
     _index_caches[key]["data"] = result
     _index_caches[key]["ts"] = time.time()
+    save_json_cache("indices_cache.json", _index_caches)
     print(f"[{key}] updated: {result}", flush=True)
 
 
 @app.route("/api/index/<key>")
 def real_index_route(key):
-    if key not in REAL_INDEX_SYMBOLS:
+    if key not in REAL_INDEX_SOURCES:
         return jsonify({"ok": False, "error": f"unknown index key '{key}'"}), 404
     if _index_caches[key]["data"] is None:
         return jsonify({"ok": False, "error": "not fetched yet"})
@@ -1353,7 +1438,7 @@ def real_index_route(key):
 
 @app.route("/api/debug/index/<key>")
 def real_index_debug(key):
-    if key not in REAL_INDEX_SYMBOLS:
+    if key not in REAL_INDEX_SOURCES:
         return jsonify({"ok": False, "error": f"unknown index key '{key}'"}), 404
     cache = _index_caches[key]
     status = _index_status[key]
@@ -1370,20 +1455,43 @@ def _make_index_background_loop(key, stagger_seconds):
     def loop():
         print(f"[{key}] background thread started", flush=True)
         time.sleep(stagger_seconds)
+
+        # Pull immediately on boot regardless of market hours, so a
+        # redeploy doesn't leave the dashboard sitting blank until the
+        # next scheduled check (which, outside the open-window logic
+        # below, could otherwise be up to an hour away).
+        try:
+            fetch_index_all(key)
+        except Exception as e:
+            print(f"[{key}] initial fetch raised: {e!r}", flush=True)
+
         while True:
-            if is_regular_market_hours():
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+            open_dt = next_market_open_et(now_et)
+            minutes_to_open = (open_dt - now_et).total_seconds() / 60
+            near_open = -5 <= minutes_to_open <= 5  # 5 min before through 5 min after
+
+            if is_regular_market_hours() or near_open:
                 try:
                     fetch_index_all(key)
                 except Exception as e:
                     print(f"[{key}] fetch_index_all raised: {e!r}", flush=True)
+                # Tighter loop right around open to catch it precisely;
+                # normal hourly cadence once solidly into the session.
+                sleep_s = 2 * 60 if near_open and not is_regular_market_hours() else REAL_INDEX_CACHE_SECONDS
             else:
                 print(f"[{key}] outside regular market hours, skipping", flush=True)
-            time.sleep(REAL_INDEX_CACHE_SECONDS)
+                # Sleep until 5 min before the near-open window starts,
+                # capped so we don't oversleep past it, but not so short
+                # that we're needlessly checking all night/weekend either.
+                sleep_s = min(max(minutes_to_open - 5, 1) * 60, 30 * 60)
+            time.sleep(sleep_s)
     return loop
 
 
 threading.Thread(target=_make_index_background_loop("nasdaq", 8), daemon=True).start()
 threading.Thread(target=_make_index_background_loop("sp500", 14), daemon=True).start()
+threading.Thread(target=_make_index_background_loop("dow", 20), daemon=True).start()
 
 
 if __name__ == "__main__":
