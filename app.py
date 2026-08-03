@@ -1309,6 +1309,38 @@ def next_market_open_et(now_et=None):
 # for per-index refresh rates sized to each quota.
 
 
+def fetch_yahoo127_key_statistics(yahoo_symbol):
+    """Crude Oil — via the "yahoo-finance127" listing's key-statistics
+    endpoint, on its own dedicated 100/month quota (separate from
+    everything else). Values come wrapped as {"raw": x, "fmt": "..."}
+    rather than flat numbers, and there's no direct change field — it's
+    computed from current price vs previous close ourselves."""
+    r = _http.get(
+        f"https://yahoo-finance127.p.rapidapi.com/key-statistics/{yahoo_symbol}",
+        headers={
+            "Content-Type": "application/json",
+            "x-rapidapi-host": "yahoo-finance127.p.rapidapi.com",
+            "x-rapidapi-key": RAPIDAPI_KEY,
+        },
+        timeout=(5, 15),
+    )
+    r.raise_for_status()
+    payload = r.json()
+    try:
+        price = float(payload["regularMarketPrice"]["raw"])
+        prev_close = float(payload["regularMarketPreviousClose"]["raw"])
+        change = price - prev_close
+        percent_change = (change / prev_close * 100) if prev_close else None
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError(f"unexpected response shape: {e!r} — raw: {str(payload)[:200]}")
+    return {
+        "ok": True,
+        "value": round(price, 2),
+        "change": round(change, 2),
+        "percent_change": round(percent_change, 2) if percent_change is not None else None,
+    }
+
+
 def fetch_yahoo_realtime1_quote(yahoo_symbol):
     """Nasdaq/S&P — via the "yahoo-finance-real-time1" listing's
     stock/get-options endpoint, which includes a full quote object for the
@@ -1372,39 +1404,69 @@ def fetch_via_live_stock_market(yahoo_symbol):
     }
 
 
-# Dow + Nasdaq share the "live-stock-market" quota; S&P 500 has the
-# "yahoo-finance-real-time1" quota to itself.
+def etf_fallback(etf_symbol):
+    """Fallback factory — a tracking ETF via Finnhub, same source already
+    used elsewhere in the app. Returns a no-arg callable."""
+    def fallback():
+        r = _http.get(
+            "https://finnhub.io/api/v1/quote",
+            params={"symbol": etf_symbol, "token": API_KEY},
+            timeout=(5, 15),
+        )
+        r.raise_for_status()
+        q = r.json()
+        if q.get("c") is None or q.get("c") == 0:
+            raise ValueError(f"{etf_symbol} quote unavailable")
+        return {"ok": True, "value": q["c"], "change": q.get("d"), "percent_change": q.get("dp"), "via": f"{etf_symbol} (proxy)"}
+    return fallback
+
+
+def macro_fallback(macro_key):
+    """Fallback factory for crude oil/treasury — reads from the existing
+    FRED-backed /api/macro cache instead of an ETF proxy, since that's a
+    more accurate stand-in (ETFs don't track a bond's yield directly, and
+    FRED already gives the genuine underlying value, just less fresh)."""
+    def fallback():
+        entry = (_macro_cache.get("data") or {}).get(macro_key)
+        if not entry or not entry.get("ok") or entry.get("value") is None:
+            raise ValueError(f"no FRED-cached {macro_key} value available")
+        return {
+            "ok": True,
+            "value": entry["value"],
+            "change": entry.get("change"),
+            "percent_change": entry.get("percent_change"),
+            "via": "FRED (daily)",
+        }
+    return fallback
+
+
 REAL_INDEX_SOURCES = {
-    "dow": (lambda: fetch_via_live_stock_market("^DJI"), "DIA"),
-    "nasdaq": (lambda: fetch_via_live_stock_market("^IXIC"), "ONEQ"),
-    "sp500": (lambda: fetch_yahoo_realtime1_quote("^GSPC"), "SPY"),
+    "dow": (lambda: fetch_via_live_stock_market("^DJI"), etf_fallback("DIA")),
+    "nasdaq": (lambda: fetch_via_live_stock_market("^IXIC"), etf_fallback("ONEQ")),
+    "sp500": (lambda: fetch_yahoo_realtime1_quote("^GSPC"), etf_fallback("SPY")),
+    "crude_oil": (lambda: fetch_yahoo127_key_statistics("CL=F"), macro_fallback("crude_oil")),
+    "treasury_10y": (lambda: fetch_via_live_stock_market("^TNX"), macro_fallback("treasury_10y")),
 }
-# Per-index cadence, sized to each quota: Dow+Nasdaq share one 500/mo pool
-# (45min each ~= 364/mo combined), S&P has its own 500/mo pool (20min ~=
-# 410/mo) — both leave a safety margin for testing/redeploys.
-REAL_INDEX_CADENCE_SECONDS = {"dow": 45 * 60, "nasdaq": 45 * 60, "sp500": 20 * 60}
+# Per-index cadence, sized to each quota:
+# - Dow+Nasdaq+Treasury share the "live-stock-market" 500/mo pool
+#   (43min+43min+91min ~= 470/mo combined)
+# - S&P has "yahoo-finance-real-time1" to itself (20min ~= 410/mo)
+# - Crude Oil has its own dedicated "yahoo-finance127" quota, just
+#   100/mo (90min ~= 91/mo)
+REAL_INDEX_CADENCE_SECONDS = {
+    "dow": 43 * 60,
+    "nasdaq": 43 * 60,
+    "sp500": 20 * 60,
+    "crude_oil": 90 * 60,
+    "treasury_10y": 91 * 60,
+}
 _index_caches_loaded = load_json_cache("indices_cache.json")
 _index_caches = {key: _index_caches_loaded.get(key, {"data": None, "ts": 0}) for key in REAL_INDEX_SOURCES}
 _index_status = {key: {"last_attempt": None, "last_error": None} for key in REAL_INDEX_SOURCES}
 
 
-def fetch_etf_fallback(etf_symbol):
-    """Fallback — a tracking ETF via Finnhub, same source already used
-    elsewhere in the app."""
-    r = _http.get(
-        "https://finnhub.io/api/v1/quote",
-        params={"symbol": etf_symbol, "token": API_KEY},
-        timeout=(5, 15),
-    )
-    r.raise_for_status()
-    q = r.json()
-    if q.get("c") is None or q.get("c") == 0:
-        raise ValueError(f"{etf_symbol} quote unavailable")
-    return {"ok": True, "value": q["c"], "change": q.get("d"), "percent_change": q.get("dp"), "via": f"{etf_symbol} (proxy)"}
-
-
 def fetch_index_all(key):
-    real_fetch_fn, etf_symbol = REAL_INDEX_SOURCES[key]
+    real_fetch_fn, fallback_fn = REAL_INDEX_SOURCES[key]
     status = _index_status[key]
     status["last_attempt"] = time.time()
     result = None
@@ -1414,13 +1476,13 @@ def fetch_index_all(key):
             result["via"] = "real index"
             status["last_error"] = None
         except Exception as e:
-            print(f"[{key}] real index attempt failed, falling back to {etf_symbol}: {e!r}", flush=True)
+            print(f"[{key}] real index attempt failed, falling back: {e!r}", flush=True)
             status["last_error"] = str(e)
     if result is None:
         try:
-            result = fetch_etf_fallback(etf_symbol)
+            result = fallback_fn()
         except Exception as e:
-            print(f"[{key}] {etf_symbol} fallback also failed: {e!r}", flush=True)
+            print(f"[{key}] fallback also failed: {e!r}", flush=True)
             result = {"ok": False, "error": str(e)}
             if status["last_error"] is None:
                 status["last_error"] = str(e)
@@ -1495,6 +1557,8 @@ def _make_index_background_loop(key, stagger_seconds):
 threading.Thread(target=_make_index_background_loop("nasdaq", 8), daemon=True).start()
 threading.Thread(target=_make_index_background_loop("sp500", 14), daemon=True).start()
 threading.Thread(target=_make_index_background_loop("dow", 20), daemon=True).start()
+threading.Thread(target=_make_index_background_loop("crude_oil", 26), daemon=True).start()
+threading.Thread(target=_make_index_background_loop("treasury_10y", 32), daemon=True).start()
 
 
 if __name__ == "__main__":
