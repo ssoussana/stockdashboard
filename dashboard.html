@@ -80,6 +80,8 @@
     .index-strip{flex-wrap:nowrap;overflow-x:auto;gap:22px;}
   }
   .index-strip .idx{display:flex;align-items:baseline;gap:8px;white-space:nowrap;flex-shrink:0;}
+  a.hormuz-link{text-decoration:none;color:inherit;cursor:pointer;}
+  a.hormuz-link:hover .val{color:var(--amber);text-decoration:underline;}
   #indexStripCore{display:contents;}
   .index-strip .idx .name{color:var(--muted);font-weight:600;}
   .index-strip .idx .val{color:var(--text);font-weight:600;}
@@ -242,8 +244,6 @@
       <span class="idx"><span class="name">NASDAQ</span> <span class="val">&mdash;</span></span>
       <span class="idx"><span class="name">S&amp;P 500</span> <span class="val">&mdash;</span></span>
     </span>
-    <span class="idx" title="WTI crude oil, real $/barrel — FRED (St. Louis Fed), updates once per business day"><span class="name">CRUDE OIL</span> <span class="val" id="macroOilVal">&mdash;</span></span>
-    <span class="idx" title="10-Year Treasury Constant Maturity Rate, real yield — FRED (St. Louis Fed), updates once per business day"><span class="name">10Y TREASURY</span> <span class="val" id="macroTreasuryVal">&mdash;</span></span>
     <span class="idx" title="Gold spot price per troy ounce — updates hourly"><span class="name">GOLD</span> <span class="val" id="goldVal">&mdash;</span></span>
     <span class="idx" title="Silver spot price per troy ounce — updates hourly"><span class="name">SILVER</span> <span class="val" id="silverVal">&mdash;</span></span>
     <span class="idx" title="Bitcoin price — updates hourly"><span class="name">BITCOIN</span> <span class="val" id="bitcoinVal">&mdash;</span></span>
@@ -570,7 +570,7 @@ async function refreshFearGreed(){
 let _realIndexQuotes = { nasdaq: null, sp500: null, dow: null };
 
 async function refreshRealIndices(){
-  for(const key of ['nasdaq', 'sp500', 'dow']){
+  for(const key of ['nasdaq', 'sp500', 'dow', 'crude_oil', 'treasury_10y']){
     try{
       const res = await fetch(`/api/index/${key}`);
       const data = await res.json();
@@ -585,40 +585,33 @@ function renderIndexStrip(){
   const strip = document.getElementById('indexStripCore');
   const asOf = `as of ${new Date().toLocaleString()}`;
 
-  function realIndexSpan(label, key, fallbackName){
+  function realIndexSpan(label, key, fallbackName, formatter){
     const q = _realIndexQuotes[key];
     if(!q || !q.ok){
       return `<span class="idx"><span class="name">${label}</span> <span class="val">&mdash;</span></span>`;
     }
     const up = q.d >= 0;
     const isReal = q.via === 'real index';
-    const valStr = isReal
-      ? q.c.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})
-      : `$${q.c.toFixed(2)}`;
-    const tip = isReal ? `${asOf} \u2014 real ${label} index` : `${asOf} \u2014 via ${fallbackName} (proxy)`;
+    const valStr = formatter ? formatter(q.c) : q.c.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+    const tip = isReal ? `${asOf} \u2014 real ${label}` : `${asOf} \u2014 via ${q.via || fallbackName}`;
+    const chgStr = q.dp != null ? `<span class="chg ${up?'up':'down'}">${up?'+':''}${q.dp.toFixed(2)}%</span>` : '';
     return `<span class="idx" title="${tip}">
       <span class="name">${label}</span>
       <span class="val">${valStr}</span>
-      <span class="chg ${up?'up':'down'}">${up?'+':''}${q.dp.toFixed(2)}%</span>
+      ${chgStr}
     </span>`;
   }
 
   strip.innerHTML =
     realIndexSpan('DOW', 'dow', 'DIA') +
     realIndexSpan('NASDAQ', 'nasdaq', 'ONEQ') +
-    realIndexSpan('S&P 500', 'sp500', 'SPY');
-}
-
-async function refreshMacro(){
-  try{
-    const res = await fetch('/api/macro');
-    const data = await res.json();
-    renderMacroValue('macroOilVal', data.crude_oil, v => `$${v.toFixed(2)}`);
-    renderMacroValue('macroTreasuryVal', data.treasury_10y, v => `${v.toFixed(2)}%`);
-  }catch(e){
-    document.getElementById('macroOilVal').textContent = '\u2014';
-    document.getElementById('macroTreasuryVal').textContent = '\u2014';
-  }
+    realIndexSpan('S&P 500', 'sp500', 'SPY') +
+    realIndexSpan('CRUDE OIL', 'crude_oil', 'FRED', v => `$${v.toFixed(2)}`) +
+    `<a href="https://hormuzstraitmonitor.com/" target="_blank" rel="noopener noreferrer" class="idx hormuz-link" title="Strait of Hormuz shipping traffic \u2014 ~20% of world oil transits here, a real-time bottleneck indicator">
+      <span class="name">\u{1F6A2} HORMUZ</span>
+      <span class="val">traffic \u2192</span>
+    </a>` +
+    realIndexSpan('10Y TREASURY', 'treasury_10y', 'FRED', v => `${v.toFixed(2)}%`);
 }
 
 async function refreshGold(){
@@ -963,14 +956,12 @@ document.addEventListener('click', (e) => {
   refreshAll();
   refreshSma();
   refreshMovers();
-  refreshMacro();
   refreshEarnings();
   refreshGold();
   refreshFedCalendar();
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(refreshMovers, 15 * 60 * 1000);
-  setInterval(refreshMacro, 15 * 60 * 1000);
   setInterval(refreshEarnings, 60 * 60 * 1000);
   setInterval(refreshGold, 60 * 60 * 1000);
   setInterval(refreshFedCalendar, 60 * 60 * 1000);
