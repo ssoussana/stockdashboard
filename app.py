@@ -1622,12 +1622,48 @@ def is_crude_oil_hours():
     return dt_time(9, 15) <= t < dt_time(16, 15)
 
 
-# Real index values via RapidAPI. Dow and Nasdaq share one listing
-# ("live-stock-market"); S&P 500 has its own separate listing
-# ("yahoo-finance-real-time1") to itself — confirmed via live tests
-# (2026-08-03) that all three return real INDEX data, not ETF proxies.
-# See REAL_INDEX_CADENCE_SECONDS below (defined after REAL_INDEX_SOURCES)
-# for per-index refresh rates sized to each quota.
+# Real index values. Dow, Nasdaq, and S&P 500 now come from FMP's
+# standard quote endpoint (confirmed via live testing 2026-08-03 that
+# ^GSPC/^DJI/^IXIC all work on the free tier — including genuine NASDAQ
+# COMPOSITE data via ^IXIC, not a QQQ/Nasdaq-100 proxy). Crude oil and
+# 10Y Treasury stay on RapidAPI, since FMP's free tier 402'd on both
+# (^TNX, and every WTI crude symbol tried). See REAL_INDEX_CADENCE_SECONDS
+# below for per-index refresh rates sized to each quota.
+
+
+def fetch_fmp_index_quote(fmp_symbol):
+    """Dow/Nasdaq/S&P 500 — FMP's standard quote endpoint, which also
+    supports index symbols on the free tier. Simpler than the old
+    RapidAPI setup: one provider, one shared 250/day quota, and real
+    index data straight from FMP rather than juggling multiple RapidAPI
+    listings with separate monthly caps."""
+    if not FMP_API_KEY:
+        raise ValueError("FMP_API_KEY not set")
+    r = _http.get(
+        "https://financialmodelingprep.com/stable/quote",
+        params={"symbol": fmp_symbol, "apikey": FMP_API_KEY},
+        timeout=(5, 15),
+    )
+    if r.text.lstrip().startswith("<"):
+        raise ValueError(f"got HTML instead of JSON (likely blocked) — first 150 chars: {r.text[:150]!r}")
+    if r.status_code == 402:
+        raise ValueError("402 Payment Required — this symbol isn't available on the free FMP plan")
+    r.raise_for_status()
+    data = r.json()
+    if not isinstance(data, list) or not data:
+        raise ValueError(f"unexpected response shape: {str(data)[:150]}")
+    item = data[0]
+    price = item.get("price")
+    if price is None:
+        raise ValueError(f"no price in response: {str(item)[:150]}")
+    change = item.get("change")
+    pct = item.get("changePercentage")
+    return {
+        "ok": True,
+        "value": round(float(price), 2),
+        "change": round(float(change), 2) if change is not None else None,
+        "percent_change": round(float(pct), 2) if pct is not None else None,
+    }
 
 
 def fetch_yahoo127_key_statistics(yahoo_symbol):
@@ -1636,6 +1672,8 @@ def fetch_yahoo127_key_statistics(yahoo_symbol):
     everything else). Values come wrapped as {"raw": x, "fmt": "..."}
     rather than flat numbers, and there's no direct change field — it's
     computed from current price vs previous close ourselves."""
+    if not RAPIDAPI_KEY:
+        raise ValueError("RAPIDAPI_KEY not set")
     r = _http.get(
         f"https://yahoo-finance127.p.rapidapi.com/key-statistics/{yahoo_symbol}",
         headers={
@@ -1662,36 +1700,14 @@ def fetch_yahoo127_key_statistics(yahoo_symbol):
     }
 
 
-def fetch_yahoo_realtime1_quote(yahoo_symbol):
-    """Nasdaq/S&P — via the "yahoo-finance-real-time1" listing's
-    stock/get-options endpoint, which includes a full quote object for the
-    underlying symbol even though it's nominally an options-chain endpoint."""
-    r = _http.get(
-        "https://yahoo-finance-real-time1.p.rapidapi.com/stock/get-options",
-        params={"symbol": yahoo_symbol, "lang": "en-US", "region": "US"},
-        headers={
-            "Content-Type": "application/json",
-            "x-rapidapi-host": "yahoo-finance-real-time1.p.rapidapi.com",
-            "x-rapidapi-key": RAPIDAPI_KEY,
-        },
-        timeout=(5, 15),
-    )
-    r.raise_for_status()
-    payload = r.json()
-    try:
-        quote = payload["optionChain"]["result"][0]["quote"]
-        price = float(quote["regularMarketPrice"])
-        change = float(quote["regularMarketChange"])
-        percent_change = float(quote["regularMarketChangePercent"])
-    except (KeyError, IndexError, TypeError, ValueError) as e:
-        raise ValueError(f"unexpected response shape: {e!r} — raw: {str(payload)[:200]}")
-    return {"ok": True, "value": round(price, 2), "change": round(change, 2), "percent_change": round(percent_change, 2)}
-
-
 def fetch_via_live_stock_market(yahoo_symbol):
-    """Dow and Nasdaq share this — the "live-stock-market" listing's chart
-    endpoint. This one returns historical OHLC data rather than a simple
+    """10Y Treasury — the "live-stock-market" listing's chart endpoint.
+    Used to be shared with Dow/Nasdaq too, but now it's Treasury's alone
+    (see cadence comment below), so it gets a much roomier refresh rate
+    than before. Returns historical OHLC data rather than a simple
     quote, so change is computed from the last two closing prices ourselves."""
+    if not RAPIDAPI_KEY:
+        raise ValueError("RAPIDAPI_KEY not set")
     r = _http.get(
         "https://live-stock-market.p.rapidapi.com/v1/index/chart",
         params={"symbol": yahoo_symbol, "interval": "1d", "range": "5d"},
@@ -1762,25 +1778,29 @@ def macro_fallback(macro_key):
 
 
 REAL_INDEX_SOURCES = {
-    "dow": (lambda: fetch_via_live_stock_market("^DJI"), etf_fallback("DIA")),
-    "nasdaq": (lambda: fetch_via_live_stock_market("^IXIC"), etf_fallback("ONEQ")),
-    "sp500": (lambda: fetch_yahoo_realtime1_quote("^GSPC"), etf_fallback("SPY")),
+    "dow": (lambda: fetch_fmp_index_quote("^DJI"), etf_fallback("DIA")),
+    "nasdaq": (lambda: fetch_fmp_index_quote("^IXIC"), etf_fallback("ONEQ")),
+    "sp500": (lambda: fetch_fmp_index_quote("^GSPC"), etf_fallback("SPY")),
     "crude_oil": (lambda: fetch_yahoo127_key_statistics("CL=F"), macro_fallback("crude_oil")),
     "treasury_10y": (lambda: fetch_via_live_stock_market("^TNX"), macro_fallback("treasury_10y")),
 }
 # Per-index cadence, sized to each quota:
-# - Dow+Nasdaq+Treasury share the "live-stock-market" 500/mo pool
-#   (43min+43min+91min ~= 470/mo combined)
-# - S&P has "yahoo-finance-real-time1" to itself (20min ~= 410/mo)
+# - Dow, Nasdaq, and S&P 500 now share FMP's single 250/day free quota
+#   (nothing else in the app uses FMP). 15min each, market hours only
+#   (~7hrs/day): 7*60/15=28 calls/day per index * 3 = 84/day combined —
+#   comfortable margin under 250/day.
+# - Treasury now has the "live-stock-market" RapidAPI quota to itself
+#   (previously shared 3 ways with Dow/Nasdaq) — 25min ~= 364/mo, safely
+#   under its 500/mo cap with real margin to spare.
 # - Crude Oil has its own dedicated "yahoo-finance127" quota, just
 #   100/mo — window is 9:15am-4:15pm ET (~7hrs/day, ~152hrs/mo);
 #   95min ~= 96/mo, just under quota
 REAL_INDEX_CADENCE_SECONDS = {
-    "dow": 43 * 60,
-    "nasdaq": 43 * 60,
-    "sp500": 20 * 60,
+    "dow": 15 * 60,
+    "nasdaq": 15 * 60,
+    "sp500": 15 * 60,
     "crude_oil": 95 * 60,
-    "treasury_10y": 91 * 60,
+    "treasury_10y": 25 * 60,
 }
 _index_caches_loaded = load_json_cache("indices_cache.json")
 _index_caches = {key: _index_caches_loaded.get(key, {"data": None, "ts": 0}) for key in REAL_INDEX_SOURCES}
@@ -1802,14 +1822,13 @@ def fetch_index_all(key):
     status = _index_status[key]
     status["last_attempt"] = time.time()
     result = None
-    if RAPIDAPI_KEY:
-        try:
-            result = real_fetch_fn()
-            result["via"] = "real index"
-            status["last_error"] = None
-        except Exception as e:
-            print(f"[{key}] real index attempt failed, falling back: {e!r}", flush=True)
-            status["last_error"] = str(e)
+    try:
+        result = real_fetch_fn()
+        result["via"] = "real index"
+        status["last_error"] = None
+    except Exception as e:
+        print(f"[{key}] real index attempt failed, falling back: {e!r}", flush=True)
+        status["last_error"] = str(e)
     if result is None:
         try:
             result = fallback_fn()
@@ -1846,6 +1865,8 @@ def real_index_debug(key):
     status = _index_status[key]
     return jsonify({
         "rapidapi_key_set": bool(RAPIDAPI_KEY),
+        "fmp_key_set": bool(FMP_API_KEY),
+        "provider": "FMP" if key in ("dow", "nasdaq", "sp500") else "RapidAPI",
         "cache_seconds_old": round(time.time() - cache["ts"], 1) if cache["data"] else None,
         "cached_data": cache["data"],
         "last_attempt_seconds_ago": round(time.time() - status["last_attempt"], 1) if status["last_attempt"] else None,
