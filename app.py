@@ -589,6 +589,67 @@ def _sma_background_loop():
 threading.Thread(target=_sma_background_loop, daemon=True).start()
 
 
+# ---------- S&P 500 constituents (used to filter market movers) ----------
+# Membership changes only a handful of times a year, so this is cached for
+# a full day rather than refreshed on the same cadence as the movers list
+# itself — keeps this to about 1 extra FMP call/day.
+SP500_CONSTITUENTS_CACHE_SECONDS = 24 * 60 * 60
+_sp500_constituents_cache = load_json_cache("sp500_constituents_cache.json") or {"data": None, "ts": 0}
+_sp500_constituents_status = {"last_attempt": None, "last_error": None}
+
+
+def fetch_sp500_constituents():
+    _sp500_constituents_status["last_attempt"] = time.time()
+    try:
+        r = _http.get(
+            "https://financialmodelingprep.com/stable/sp500-constituent",
+            params={"apikey": FMP_API_KEY},
+            timeout=(5, 15),
+        )
+        if r.text.lstrip().startswith("<"):
+            raise ValueError(f"got HTML instead of JSON (likely blocked) — first 150 chars: {r.text[:150]!r}")
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, list):
+            raise ValueError(f"unexpected response shape: {str(data)[:150]}")
+        symbols = sorted({item.get("symbol") for item in data if item.get("symbol")})
+        _sp500_constituents_cache["data"] = symbols
+        _sp500_constituents_cache["ts"] = time.time()
+        save_json_cache("sp500_constituents_cache.json", _sp500_constituents_cache)
+        _sp500_constituents_status["last_error"] = None
+        print(f"[sp500_constituents] updated: {len(symbols)} symbols", flush=True)
+    except Exception as e:
+        _sp500_constituents_status["last_error"] = str(e)
+        print(f"[sp500_constituents] fetch failed: {e!r}", flush=True)
+        raise
+
+
+@app.route("/api/debug/sp500-constituents")
+def sp500_constituents_debug():
+    cached = _sp500_constituents_cache.get("data")
+    return jsonify({
+        "count": len(cached) if cached else None,
+        "cache_seconds_old": round(time.time() - _sp500_constituents_cache["ts"], 1) if cached else None,
+        "last_attempt_seconds_ago": round(time.time() - _sp500_constituents_status["last_attempt"], 1) if _sp500_constituents_status["last_attempt"] else None,
+        "last_error": _sp500_constituents_status["last_error"],
+    })
+
+
+def _sp500_constituents_background_loop():
+    print("[sp500_constituents] background thread started", flush=True)
+    time.sleep(2)  # fetch early — movers filtering needs this populated
+    while True:
+        if FMP_API_KEY:
+            try:
+                fetch_sp500_constituents()
+            except Exception as e:
+                print(f"[sp500_constituents] fetch_sp500_constituents raised: {e!r}", flush=True)
+        time.sleep(SP500_CONSTITUENTS_CACHE_SECONDS)
+
+
+threading.Thread(target=_sp500_constituents_background_loop, daemon=True).start()
+
+
 # ---------- Market movers (top gainers/losers, whole-market — not tied to
 # the watchlist) ----------
 MOVERS_CACHE_SECONDS = 15 * 60  # FMP free tier: 250 requests/day — keep this gentle
@@ -610,6 +671,10 @@ def _fetch_movers_list_raw(endpoint):
     data = r.json()
     if not isinstance(data, list):
         raise ValueError(f"unexpected response shape: {str(data)[:150]}")
+    # Pull the full list here (not just top 5) — most of FMP's
+    # whole-market biggest-gainers/losers are illiquid micro-caps that
+    # won't be S&P 500 members, so we need enough candidates left to
+    # still find 5 real S&P 500 movers after filtering.
     return [
         {
             "symbol": item.get("symbol"),
@@ -618,7 +683,7 @@ def _fetch_movers_list_raw(endpoint):
             "change": item.get("change"),
             "changesPercentage": item.get("changesPercentage"),
         }
-        for item in data[:5]
+        for item in data
         if item.get("symbol")
     ]
 
@@ -651,12 +716,27 @@ def fetch_movers_all():
     _movers_status["last_attempt"] = time.time()
     print("[movers] requesting biggest-gainers and biggest-losers", flush=True)
     try:
-        gainers = fetch_movers_list("biggest-gainers")
-        losers = fetch_movers_list("biggest-losers")
+        gainers_raw = fetch_movers_list("biggest-gainers")
+        losers_raw = fetch_movers_list("biggest-losers")
     except Exception as e:
         _movers_status["last_error"] = str(e)
         print(f"[movers] fetch failed: {e!r}", flush=True)
         raise
+
+    sp500_symbols = _sp500_constituents_cache.get("data")
+    if sp500_symbols:
+        sp500_set = set(sp500_symbols)
+        gainers = [item for item in gainers_raw if item["symbol"] in sp500_set][:5]
+        losers = [item for item in losers_raw if item["symbol"] in sp500_set][:5]
+    else:
+        # S&P 500 list hasn't loaded yet (e.g. right after a fresh
+        # deploy) — fall back to the unfiltered top 5 rather than
+        # showing nothing, and this corrects itself once the
+        # constituents fetch completes.
+        print("[movers] S&P 500 constituent list not yet available, showing unfiltered movers", flush=True)
+        gainers = gainers_raw[:5]
+        losers = losers_raw[:5]
+
     _movers_cache["data"] = {"gainers": gainers, "losers": losers}
     _movers_cache["ts"] = time.time()
     save_json_cache("movers_cache.json", _movers_cache)
@@ -683,6 +763,8 @@ def movers_debug():
         "last_error": _movers_status["last_error"],
         "process_id": os.getpid(),
         "process_uptime_seconds": round(time.time() - _process_started_at, 1),
+        "sp500_filter_active": bool(_sp500_constituents_cache.get("data")),
+        "sp500_constituent_count": len(_sp500_constituents_cache["data"]) if _sp500_constituents_cache.get("data") else None,
     })
 
 
