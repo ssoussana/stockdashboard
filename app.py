@@ -1301,15 +1301,12 @@ def next_market_open_et(now_et=None):
     return candidate
 
 
-# Real index values via RapidAPI. Nasdaq and S&P share one listing
-# ("yahoo-finance-real-time1"); Dow uses a DIFFERENT listing
-# ("live-stock-market") specifically so it draws from its own separate
-# 500/month quota rather than competing with the other two — confirmed
-# via live tests (2026-08-03) that all three return real INDEX data, not
-# ETF proxies.
-REAL_INDEX_CACHE_SECONDS = 60 * 60  # hourly per index, during market hours
-    # only. Nasdaq+S&P share one ~500/mo quota (~273/mo combined); Dow has
-    # its own separate ~500/mo quota via the different listing.
+# Real index values via RapidAPI. Dow and Nasdaq share one listing
+# ("live-stock-market"); S&P 500 has its own separate listing
+# ("yahoo-finance-real-time1") to itself — confirmed via live tests
+# (2026-08-03) that all three return real INDEX data, not ETF proxies.
+# See REAL_INDEX_CADENCE_SECONDS below (defined after REAL_INDEX_SOURCES)
+# for per-index refresh rates sized to each quota.
 
 
 def fetch_yahoo_realtime1_quote(yahoo_symbol):
@@ -1338,13 +1335,13 @@ def fetch_yahoo_realtime1_quote(yahoo_symbol):
     return {"ok": True, "value": round(price, 2), "change": round(change, 2), "percent_change": round(percent_change, 2)}
 
 
-def fetch_dow_via_live_stock_market():
-    """Dow — via the "live-stock-market" listing's chart endpoint. This one
-    returns historical OHLC data rather than a simple quote, so change is
-    computed from the last two closing prices ourselves."""
+def fetch_via_live_stock_market(yahoo_symbol):
+    """Dow and Nasdaq share this — the "live-stock-market" listing's chart
+    endpoint. This one returns historical OHLC data rather than a simple
+    quote, so change is computed from the last two closing prices ourselves."""
     r = _http.get(
         "https://live-stock-market.p.rapidapi.com/v1/index/chart",
-        params={"symbol": "^DJI", "interval": "1d", "range": "5d"},
+        params={"symbol": yahoo_symbol, "interval": "1d", "range": "5d"},
         headers={
             "Content-Type": "application/json",
             "x-rapidapi-host": "live-stock-market.p.rapidapi.com",
@@ -1375,11 +1372,17 @@ def fetch_dow_via_live_stock_market():
     }
 
 
+# Dow + Nasdaq share the "live-stock-market" quota; S&P 500 has the
+# "yahoo-finance-real-time1" quota to itself.
 REAL_INDEX_SOURCES = {
-    "nasdaq": (lambda: fetch_yahoo_realtime1_quote("^IXIC"), "ONEQ"),
+    "dow": (lambda: fetch_via_live_stock_market("^DJI"), "DIA"),
+    "nasdaq": (lambda: fetch_via_live_stock_market("^IXIC"), "ONEQ"),
     "sp500": (lambda: fetch_yahoo_realtime1_quote("^GSPC"), "SPY"),
-    "dow": (fetch_dow_via_live_stock_market, "DIA"),
 }
+# Per-index cadence, sized to each quota: Dow+Nasdaq share one 500/mo pool
+# (45min each ~= 364/mo combined), S&P has its own 500/mo pool (20min ~=
+# 410/mo) — both leave a safety margin for testing/redeploys.
+REAL_INDEX_CADENCE_SECONDS = {"dow": 45 * 60, "nasdaq": 45 * 60, "sp500": 20 * 60}
 _index_caches_loaded = load_json_cache("indices_cache.json")
 _index_caches = {key: _index_caches_loaded.get(key, {"data": None, "ts": 0}) for key in REAL_INDEX_SOURCES}
 _index_status = {key: {"last_attempt": None, "last_error": None} for key in REAL_INDEX_SOURCES}
@@ -1477,8 +1480,8 @@ def _make_index_background_loop(key, stagger_seconds):
                 except Exception as e:
                     print(f"[{key}] fetch_index_all raised: {e!r}", flush=True)
                 # Tighter loop right around open to catch it precisely;
-                # normal hourly cadence once solidly into the session.
-                sleep_s = 2 * 60 if near_open and not is_regular_market_hours() else REAL_INDEX_CACHE_SECONDS
+                # normal per-index cadence once solidly into the session.
+                sleep_s = 2 * 60 if near_open and not is_regular_market_hours() else REAL_INDEX_CADENCE_SECONDS[key]
             else:
                 print(f"[{key}] outside regular market hours, skipping", flush=True)
                 # Sleep until 5 min before the near-open window starts,
