@@ -278,7 +278,7 @@
 
   <footer>
     Quotes via Finnhub &middot; Sentiment via feargreedchart.com &middot; Sparklines reflect this session only<br>
-    Price color: green below both SMAs, blue between them, yellow above both, red 20%+ over the 20d SMA &middot; RSI: green &le;30 (oversold), red &ge;70 (overbought) &middot; not financial advice
+    Price color: green below both SMAs, blue below 15% over the 20d SMA, yellow 15-20% over, red 20%+ over &middot; RSI: green &le;30 (oversold), red &ge;70 (overbought) &middot; not financial advice
   </footer>
 </div>
 
@@ -520,23 +520,25 @@ function renderSma(sym){
 
   // Four-tier entry-price read, all keyed off the same "is this a good
   // price to buy in at" question (every symbol here is one Steve already
-  // wants to own):
-  //   - below both SMAs        -> green    (discount vs. recent average)
-  //   - between the two SMAs   -> blue     (roughly fair/neutral)
-  //   - above both, but < 20%
-  //     over the 20d SMA       -> yellow   (getting extended, caution)
+  // wants to own — Steve sells puts on these ~25-35 DTE, so the 20d SMA
+  // is the relevant lookback, close to that expiry window):
+  //   - below both SMAs          -> green   (discount vs. recent average)
+  //   - between the two SMAs, OR
+  //     above both but < 15%
+  //     over the 20d SMA         -> blue    (still fine to sell puts on)
+  //   - above both, 15% to <20%
+  //     over the 20d SMA         -> yellow  (getting extended, caution)
   //   - above both, >= 20%
-  //     over the 20d SMA       -> red      (significantly extended)
-  // The 20% cutoff is measured against the 20-day SMA specifically
-  // (closer to current price than the 50d) rather than the 50d or a
-  // blend of both. A heuristic, not a signal to act on.
+  //     over the 20d SMA         -> red     (significantly extended)
+  // A heuristic, not a signal to act on.
   if(priceEl && price != null && s.sma20 != null && s.sma50 != null){
     priceEl.classList.remove('signal-below','signal-mixed','signal-above','signal-extended');
     if(price < s.sma20 && price < s.sma50){
       priceEl.classList.add('signal-below');
     }else if(price >= s.sma20 && price >= s.sma50){
       const pctOver20d = (price - s.sma20) / s.sma20 * 100;
-      priceEl.classList.add(pctOver20d >= 20 ? 'signal-extended' : 'signal-above');
+      const cls = pctOver20d >= 20 ? 'signal-extended' : pctOver20d >= 15 ? 'signal-above' : 'signal-mixed';
+      priceEl.classList.add(cls);
     }else{
       priceEl.classList.add('signal-mixed');
     }
