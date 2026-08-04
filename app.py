@@ -627,376 +627,6 @@ def _sma_background_loop():
 threading.Thread(target=_sma_background_loop, daemon=True).start()
 
 
-# ---------- S&P 500 constituents (used to filter market movers) ----------
-# FMP's /stable/sp500-constituent endpoint turned out to require a paid
-# plan (402 Payment Required on Steve's free-tier key). Membership only
-# changes a handful of times a year, so instead of paying for a live API,
-# this re-scrapes Wikipedia's public "List of S&P 500 companies" page
-# every 45 days in the background — no redeploy needed for the list
-# itself to stay current, only this mechanism needed deploying once.
-#
-# SP500_SYMBOLS_SEED is the fallback: a static snapshot (sourced from the
-# same Wikipedia page) current as of 2026-08-03, used until the first
-# live scrape succeeds, and used again afterward if a scrape ever fails
-# or returns something implausible (Wikipedia's table markup changing
-# would break the parser below — this bounds the damage from that).
-SP500_SYMBOLS_SEED = frozenset({
-    "A", "AAPL", "ABBV", "ABNB", "ABT", "ACGL", "ACN", "ADBE", "ADI", "ADM",
-    "ADP", "ADSK", "AEE", "AEP", "AES", "AFL", "AIG", "AIZ", "AJG", "AKAM",
-    "ALB", "ALGN", "ALL", "ALLE", "AMAT", "AMCR", "AMD", "AME", "AMGN", "AMP",
-    "AMT", "AMZN", "ANET", "AON", "AOS", "APA", "APD", "APH", "APO", "APP",
-    "APTV", "ARE", "ARES", "ATO", "AVB", "AVGO", "AVY", "AWK", "AXON", "AXP",
-    "AZO", "BA", "BAC", "BALL", "BAX", "BBY", "BDX", "BEN", "BF.B", "BG",
-    "BIIB", "BKNG", "BKR", "BLDR", "BLK", "BMY", "BNY", "BR", "BRK.B", "BRO",
-    "BSX", "BX", "BXP", "C", "CAG", "CAH", "CARR", "CASY", "CAT", "CB",
-    "CBOE", "CBRE", "CCI", "CCL", "CDNS", "CDW", "CEG", "CF", "CFG", "CHD",
-    "CHRW", "CHTR", "CI", "CIEN", "CINF", "CL", "CLX", "CMCSA", "CME", "CMG",
-    "CMI", "CMS", "CNC", "CNP", "COF", "COHR", "COIN", "COO", "COP", "COR",
-    "COST", "CPAY", "CPB", "CPRT", "CPT", "CRH", "CRL", "CRM", "CRWD", "CSCO",
-    "CSGP", "CSX", "CTAS", "CTSH", "CTVA", "CVNA", "CVS", "CVX", "D", "DAL",
-    "DASH", "DD", "DDOG", "DE", "DECK", "DELL", "DG", "DGX", "DHI", "DHR",
-    "DIS", "DLR", "DLTR", "DOC", "DOV", "DOW", "DPZ", "DRI", "DTE", "DUK",
-    "DVA", "DVN", "DXCM", "EA", "EBAY", "ECL", "ED", "EFX", "EG", "EIX",
-    "EL", "ELV", "EME", "EMR", "EOG", "EPAM", "EQIX", "EQR", "EQT", "ERIE",
-    "ES", "ESS", "ETN", "ETR", "EVRG", "EW", "EXC", "EXE", "EXPD", "EXPE",
-    "EXR", "F", "FANG", "FAST", "FCX", "FDS", "FDX", "FE", "FFIV", "FICO",
-    "FIS", "FISV", "FITB", "FIX", "FOX", "FOXA", "FRT", "FSLR", "FTNT", "FTV",
-    "GD", "GDDY", "GE", "GEHC", "GEN", "GEV", "GILD", "GIS", "GL", "GLW",
-    "GM", "GNRC", "GOOG", "GOOGL", "GPC", "GPN", "GRMN", "GS", "GWW", "HAL",
-    "HAS", "HBAN", "HCA", "HD", "HIG", "HII", "HLT", "HON", "HOOD", "HPE",
-    "HPQ", "HRL", "HSIC", "HST", "HSY", "HUBB", "HUM", "HWM", "IBKR", "IBM",
-    "ICE", "IDXX", "IEX", "IFF", "INCY", "INTC", "INTU", "INVH", "IP", "IQV",
-    "IR", "IRM", "ISRG", "IT", "ITW", "IVZ", "J", "JBHT", "JBL", "JCI",
-    "JKHY", "JNJ", "JPM", "KDP", "KEY", "KEYS", "KHC", "KIM", "KKR", "KLAC",
-    "KMB", "KMI", "KO", "KR", "KVUE", "L", "LDOS", "LEN", "LH", "LHX",
-    "LII", "LIN", "LITE", "LLY", "LMT", "LNT", "LOW", "LRCX", "LULU", "LUV",
-    "LVS", "LYB", "LYV", "MA", "MAA", "MAR", "MAS", "MCD", "MCHP", "MCK",
-    "MCO", "MDLZ", "MDT", "MET", "META", "MGM", "MKC", "MLM", "MMM", "MNST",
-    "MO", "MOS", "MPC", "MPWR", "MRK", "MRNA", "MRSH", "MS", "MSCI", "MSFT",
-    "MSI", "MTB", "MTD", "MU", "NCLH", "NDAQ", "NDSN", "NEE", "NEM", "NFLX",
-    "NI", "NKE", "NOC", "NOW", "NRG", "NSC", "NTAP", "NTRS", "NUE", "NVDA",
-    "NVR", "NWS", "NWSA", "NXPI", "O", "ODFL", "OKE", "OMC", "ON", "ORCL",
-    "ORLY", "OTIS", "OXY", "PANW", "PAYX", "PCAR", "PCG", "PEG", "PEP", "PFE",
-    "PFG", "PG", "PGR", "PH", "PHM", "PKG", "PLD", "PLTR", "PM", "PNC",
-    "PNR", "PNW", "PODD", "POOL", "PPG", "PPL", "PRU", "PSA", "PSKY", "PSX",
-    "PTC", "PWR", "PYPL", "Q", "QCOM", "RCL", "REG", "REGN", "RF", "RJF",
-    "RL", "RMD", "ROK", "ROL", "ROP", "ROST", "RSG", "RTX", "RVTY", "SATS",
-    "SBAC", "SBUX", "SCHW", "SHW", "SJM", "SLB", "SMCI", "SNA", "SNDK", "SNPS",
-    "SO", "SOLV", "SPG", "SPGI", "SRE", "STE", "STLD", "STT", "STX", "STZ",
-    "SW", "SWK", "SWKS", "SYF", "SYK", "SYY", "T", "TAP", "TDG", "TDY",
-    "TECH", "TEL", "TER", "TFC", "TGT", "TJX", "TKO", "TMO", "TMUS", "TPL",
-    "TPR", "TRGP", "TRMB", "TROW", "TRV", "TSCO", "TSLA", "TSN", "TT", "TTD",
-    "TTWO", "TXN", "TXT", "TYL", "UAL", "UBER", "UDR", "UHS", "ULTA", "UNH",
-    "UNP", "UPS", "URI", "USB", "V", "VEEV", "VICI", "VLO", "VLTO", "VMC",
-    "VRSK", "VRSN", "VRT", "VRTX", "VST", "VTR", "VTRS", "VZ", "WAB", "WAT",
-    "WBD", "WDAY", "WDC", "WEC", "WELL", "WFC", "WM", "WMB", "WMT", "WRB",
-    "WSM", "WST", "WTW", "WY", "WYNN", "XEL", "XOM", "XYL", "XYZ", "YUM",
-    "ZBH", "ZBRA", "ZTS",
-})
-
-SP500_REFRESH_SECONDS = 45 * 24 * 60 * 60  # ~45 days
-SP500_WIKI_URL = "https://en.wikipedia.org/api/rest_v1/page/html/List_of_S%26P_500_companies"
-# A parsed list is only trusted if it falls in this range — the real
-# count is ~503 (500 companies, a few with dual share classes). Anything
-# wildly outside this suggests the parser broke against a markup change,
-# not a real S&P 500 size change.
-SP500_PLAUSIBLE_COUNT_RANGE = (450, 550)
-
-_sp500_cache = load_json_cache("sp500_constituents_cache.json") or {"data": None, "ts": 0}
-_sp500_status = {"last_attempt": None, "last_error": None, "last_success_source": None}
-
-
-def _strip_html(fragment):
-    """Strips tags and unescapes entities from an HTML fragment — used
-    instead of pulling in a full HTML-parsing dependency for this one
-    scheduled task."""
-    import html as _html_mod
-    text = re.sub(r"<[^>]+>", "", fragment)
-    return _html_mod.unescape(text).strip()
-
-
-def fetch_sp500_symbols_from_wikipedia():
-    """Scrapes Wikipedia's "List of S&P 500 companies" page for the
-    current constituent table. There's no clean structured API for this
-    data for free, so this parses the rendered HTML table directly —
-    more fragile than a real API, which is why every result is sanity-
-    checked against SP500_PLAUSIBLE_COUNT_RANGE before being trusted."""
-    _sp500_status["last_attempt"] = time.time()
-    try:
-        r = _http.get(
-            SP500_WIKI_URL,
-            headers={"User-Agent": "StockDashboard-Personal/1.0 (personal project; low-frequency, every 45 days)"},
-            timeout=(5, 20),
-        )
-        r.raise_for_status()
-        html_text = r.text
-
-        # The constituents table is the first table on the page marked
-        # both "wikitable" and "sortable" (the separate historical
-        # "changes" table further down isn't marked sortable).
-        table_match = None
-        for m in re.finditer(r"<table\b([^>]*)>(.*?)</table>", html_text, re.S | re.I):
-            attrs, body = m.group(1), m.group(2)
-            if "wikitable" in attrs and "sortable" in attrs:
-                table_match = body
-                break
-        if table_match is None:
-            raise ValueError("couldn't find a wikitable+sortable table on the page")
-
-        rows = re.findall(r"<tr\b.*?>(.*?)</tr>", table_match, re.S | re.I)
-        symbols = []
-        rejected = []
-        for row in rows:
-            cells = re.findall(r"<td\b.*?>(.*?)</td>", row, re.S | re.I)
-            if not cells:
-                continue  # header row uses <th>, not <td> — skip it
-            symbol = _strip_html(cells[0])
-            # Tickers are short, uppercase, and at most one "." (e.g.
-            # BRK.B). Anything else suggests we grabbed the wrong cell —
-            # e.g. a stray footnote marker or a markup change — so it's
-            # dropped rather than silently polluting the filter list.
-            if symbol and re.fullmatch(r"[A-Z]{1,6}(\.[A-Z]{1,2})?", symbol):
-                symbols.append(symbol)
-            elif symbol:
-                rejected.append(symbol)
-
-        symbols = sorted(set(symbols))
-        lo, hi = SP500_PLAUSIBLE_COUNT_RANGE
-        if not (lo <= len(symbols) <= hi):
-            raise ValueError(
-                f"parsed {len(symbols)} valid-looking symbols ({len(rejected)} rejected), "
-                f"outside plausible range {lo}-{hi} — Wikipedia's table markup may have changed. "
-                f"Sample rejected: {rejected[:5]}"
-            )
-
-        _sp500_cache["data"] = symbols
-        _sp500_cache["ts"] = time.time()
-        save_json_cache("sp500_constituents_cache.json", _sp500_cache)
-        _sp500_status["last_error"] = None
-        _sp500_status["last_success_source"] = "wikipedia"
-        print(f"[sp500] updated from Wikipedia: {len(symbols)} symbols", flush=True)
-    except Exception as e:
-        _sp500_status["last_error"] = str(e)
-        print(f"[sp500] Wikipedia scrape failed, keeping last-known-good list: {e!r}", flush=True)
-        raise
-
-
-def get_sp500_symbols():
-    """The set actually used for filtering — live-scraped data if
-    available, falling back to the embedded seed otherwise."""
-    live = _sp500_cache.get("data")
-    return frozenset(live) if live else SP500_SYMBOLS_SEED
-
-
-@app.route("/api/debug/sp500-constituents")
-def sp500_constituents_debug():
-    live = _sp500_cache.get("data")
-    return jsonify({
-        "active_count": len(get_sp500_symbols()),
-        "source": "wikipedia (live)" if live else "seed fallback (static, 2026-08-03)",
-        "cache_seconds_old": round(time.time() - _sp500_cache["ts"], 1) if live else None,
-        "last_attempt_seconds_ago": round(time.time() - _sp500_status["last_attempt"], 1) if _sp500_status["last_attempt"] else None,
-        "last_error": _sp500_status["last_error"],
-        "refresh_interval_days": SP500_REFRESH_SECONDS / 86400,
-    })
-
-
-def _sp500_background_loop():
-    print("[sp500] background thread started", flush=True)
-    time.sleep(35)  # staggered — see movers loop comment
-    while True:
-        cache_age = time.time() - _sp500_cache["ts"] if _sp500_cache.get("data") else None
-        if cache_age is None or cache_age >= SP500_REFRESH_SECONDS:
-            try:
-                fetch_sp500_symbols_from_wikipedia()
-            except Exception as e:
-                print(f"[sp500] fetch_sp500_symbols_from_wikipedia raised: {e!r}", flush=True)
-            sleep_s = SP500_REFRESH_SECONDS
-        else:
-            # A fresh-enough cache already exists (e.g. survived a
-            # redeploy) — just wait out the rest of its 45-day window.
-            sleep_s = SP500_REFRESH_SECONDS - cache_age
-        time.sleep(sleep_s)
-
-
-threading.Thread(target=_sp500_background_loop, daemon=True).start()
-
-
-# ---------- Market movers (top gainers/losers, computed from S&P 500
-# constituents directly — not tied to the watchlist) ----------
-# Previously tried FMP's whole-market "biggest movers" feed filtered to
-# S&P 500 (near-empty — blue-chips rarely make "biggest % movers" lists
-# dominated by micro-caps), then FMP's batch-quote endpoint (requires a
-# paid $59/mo Premium plan). This uses Finnhub instead — the same
-# provider (and the same fetch_quote_one/_quote_executor/_quote_cache)
-# already powering the watchlist — so it costs nothing extra, and any
-# symbol that's in both the watchlist and S&P 500 (e.g. NVDA, PLTR,
-# HOOD) is a cache hit here instead of a duplicate API call.
-#
-# Finnhub's free tier is 60 calls/minute. This paces the 503-symbol
-# sweep in batches of MOVERS_SP500_PACE_PER_MIN per minute rather than
-# firing them all at once, deliberately leaving headroom: even if the
-# watchlist grows to ~25 symbols (current + 10ish more), combined usage
-# stays comfortably under 60/min. At 25/min the full sweep takes ~20
-# minutes, well inside the 30-minute refresh cadence.
-MOVERS_CACHE_SECONDS = 30 * 60
-MOVERS_SP500_PACE_PER_MIN = 25
-_movers_cache = load_json_cache("movers_cache.json") or {"data": None, "ts": 0}
-_movers_status = {"last_attempt": None, "last_error": None}
-
-# Set for the duration of the ~20min movers sweep. The earnings loop's
-# once-daily burst (4 simultaneous Finnhub calls) collided with this
-# sweep on a redeploy — the burst's short 6s timeouts starved on this
-# host's 0.5 CPU while movers was mid-sweep, poisoning the earnings
-# cache with timeout errors for the rest of that day. Earnings checks
-# this before firing its burst and waits it out rather than colliding.
-# Regular per-symbol watchlist quote fetching deliberately does NOT
-# check this — those are individually paced already and coexist fine
-# with the sweep, and blocking the live UI's quotes behind a ~20min
-# flag would be a much worse regression than the original problem.
-_movers_sweep_active = threading.Event()
-
-
-def fetch_sp500_quotes_paced():
-    _movers_sweep_active.set()
-    try:
-        symbols = sorted(get_sp500_symbols())
-        quotes = []
-        for i in range(0, len(symbols), MOVERS_SP500_PACE_PER_MIN):
-            batch_start = time.time()
-            batch = symbols[i:i + MOVERS_SP500_PACE_PER_MIN]
-
-            # Cache hits (e.g. symbols also on the watchlist, already fetched
-            # this minute) don't count against pacing — only symbols we
-            # actually need to hit Finnhub for do.
-            to_fetch = []
-            for sym in batch:
-                cached = get_quote_cached(sym)
-                if cached is not None:
-                    if cached.get("ok"):
-                        quotes.append({"symbol": sym, **cached})
-                else:
-                    to_fetch.append(sym)
-
-            if to_fetch:
-                results = list(_quote_executor.map(fetch_quote_one, to_fetch))
-                now = time.time()
-                for sym, data in zip(to_fetch, results):
-                    _quote_cache[sym] = {"data": data, "ts": now}
-                    if data.get("ok"):
-                        quotes.append({"symbol": sym, **data})
-                save_json_cache("quote_cache.json", _quote_cache)
-
-            is_last_batch = (i + MOVERS_SP500_PACE_PER_MIN) >= len(symbols)
-            if not is_last_batch:
-                elapsed = time.time() - batch_start
-                remaining = 60 - elapsed
-                if remaining > 0:
-                    time.sleep(remaining)
-        return quotes
-    finally:
-        _movers_sweep_active.clear()
-
-
-def fetch_movers_all():
-    _movers_status["last_attempt"] = time.time()
-    print("[movers] requesting S&P 500 quotes via Finnhub (paced sweep)", flush=True)
-    try:
-        quotes = fetch_sp500_quotes_paced()
-    except Exception as e:
-        _movers_status["last_error"] = str(e)
-        print(f"[movers] fetch failed: {e!r}", flush=True)
-        raise
-
-    valid = []
-    for q in quotes:
-        price = q.get("c")
-        pct = q.get("dp")
-        if price is None or pct is None:
-            continue
-        valid.append({
-            "symbol": q["symbol"],
-            # Finnhub's quote endpoint doesn't return a company name —
-            # the ticker itself is what's shown.
-            "name": q["symbol"],
-            "price": price,
-            "change": q.get("d"),
-            "changesPercentage": pct,
-        })
-
-    gainers = sorted(valid, key=lambda x: x["changesPercentage"], reverse=True)[:5]
-    losers = sorted(valid, key=lambda x: x["changesPercentage"])[:5]
-
-    _movers_cache["data"] = {"gainers": gainers, "losers": losers}
-    _movers_cache["ts"] = time.time()
-    save_json_cache("movers_cache.json", _movers_cache)
-    _movers_status["last_error"] = None
-    print(f"[movers] updated: {len(gainers)} gainers, {len(losers)} losers "
-          f"(from {len(valid)} of {len(quotes)} S&P 500 quotes)", flush=True)
-
-
-@app.route("/api/movers")
-def movers():
-    if _movers_cache["data"] is None:
-        return jsonify({"error": "not fetched yet", "gainers": [], "losers": []})
-    return jsonify(_movers_cache["data"])
-
-
-@app.route("/api/debug/movers")
-def movers_debug():
-    return jsonify({
-        "cache_seconds_old": round(time.time() - _movers_cache["ts"], 1) if _movers_cache["data"] else None,
-        "cached_data": _movers_cache["data"],
-        "last_attempt_seconds_ago": round(time.time() - _movers_status["last_attempt"], 1) if _movers_status["last_attempt"] else None,
-        "last_error": _movers_status["last_error"],
-        "process_id": os.getpid(),
-        "process_uptime_seconds": round(time.time() - _process_started_at, 1),
-        "source": "S&P 500 quotes via Finnhub (paced sweep, shares cache with watchlist)",
-        "sp500_constituent_count": len(get_sp500_symbols()),
-        "pace_per_minute": MOVERS_SP500_PACE_PER_MIN,
-    })
-
-
-def _movers_background_loop():
-    print("[movers] background thread started", flush=True)
-    time.sleep(5)  # staggered so background threads don't all burst-fetch
-                   # simultaneously at boot, competing for this host's 0.5 CPU
-
-    # Pull immediately on boot if currently within market hours, so a
-    # redeploy during the trading day doesn't leave movers sitting on
-    # stale data until the next scheduled window. Unlike the index/gold
-    # loops' immediate-fetch (a single cheap call), this one is a full
-    # ~500-call paced sweep — not worth running on a redeploy at 2am
-    # when prices aren't moving anyway, so it's gated by market hours
-    # here rather than being truly unconditional.
-    if is_market_hours_with_buffer():
-        try:
-            fetch_movers_all()
-        except Exception as e:
-            print(f"[movers] initial fetch raised: {e!r}", flush=True)
-
-    while True:
-        # Same market-hours +/-15min window already used to gate regular
-        # watchlist quote fetching — no point sweeping 503 symbols for
-        # prices that aren't moving outside trading hours.
-        if is_market_hours_with_buffer():
-            try:
-                fetch_movers_all()
-            except Exception as e:
-                print(f"[movers] fetch_movers_all raised: {e!r}", flush=True)
-            sleep_s = MOVERS_CACHE_SECONDS
-        else:
-            print("[movers] outside movers update window, skipping", flush=True)
-            now_et = datetime.now(ZoneInfo("America/New_York"))
-            next_window_open = next_market_open_et(now_et) - timedelta(minutes=15)
-            minutes_to_open = (next_window_open - now_et).total_seconds() / 60
-            sleep_s = min(max(minutes_to_open, 1) * 60, 30 * 60)
-        time.sleep(sleep_s)
-
-
-threading.Thread(target=_movers_background_loop, daemon=True).start()
-
-
 # ---------- Macro (crude oil, 10-year Treasury yield) ----------
 MACRO_CACHE_SECONDS = 60 * 60  # FRED itself only updates once per business day
 MACRO_CACHE_FILE = "macro_cache.json"
@@ -1095,7 +725,7 @@ def macro_debug():
 
 def _macro_background_loop():
     print("[macro] background thread started", flush=True)
-    time.sleep(10)  # staggered — see movers loop comment
+    time.sleep(10)  # staggered so background threads don't all burst-fetch simultaneously at boot, competing for this host's 0.5 CPU
     while True:
         if FRED_API_KEY:
             try:
@@ -1236,21 +866,10 @@ EARNINGS_MAX_QUICK_RETRIES = 2
 
 def _earnings_background_loop():
     print("[earnings] background thread started", flush=True)
-    time.sleep(15)  # staggered — see movers loop comment. This one's the
-                     # heaviest burst (4 parallel workers), so it goes last.
+    time.sleep(15)  # staggered so background threads don't all burst-fetch
+                     # simultaneously at boot, competing for this host's 0.5 CPU
     consecutive_failures = 0
     while True:
-        # Defer to an in-progress movers sweep (~20min of steady Finnhub
-        # traffic) rather than firing 4 simultaneous calls into it — that
-        # collision previously starved earnings' short 6s timeouts and
-        # poisoned the cache with errors for a full day. Capped wait so a
-        # stuck/hung sweep can't block earnings indefinitely.
-        waited = 0
-        while _movers_sweep_active.is_set() and waited < 25 * 60:
-            print("[earnings] movers sweep in progress, waiting...", flush=True)
-            time.sleep(30)
-            waited += 30
-
         try:
             ok_count, total = fetch_earnings_all(active_known_symbols())
             if total > 0 and ok_count == 0:
@@ -1406,16 +1025,10 @@ def pe_debug():
 
 def _pe_background_loop():
     print("[pe] background thread started", flush=True)
-    time.sleep(20)  # staggered — after earnings' 15s, before nothing critical
+    time.sleep(20)  # staggered so background threads don't all burst-fetch
+                     # simultaneously at boot, competing for this host's 0.5 CPU
     consecutive_failures = 0
     while True:
-        # Same movers-sweep deferral as earnings — see that loop's comment.
-        waited = 0
-        while _movers_sweep_active.is_set() and waited < 25 * 60:
-            print("[pe] movers sweep in progress, waiting...", flush=True)
-            time.sleep(30)
-            waited += 30
-
         try:
             ok_count, total = fetch_pe_all(active_known_symbols())
             if total > 0 and ok_count == 0:
@@ -1556,7 +1169,7 @@ def gold_debug():
 
 def _gold_background_loop():
     print("[gold] background thread started", flush=True)
-    time.sleep(20)  # staggered — see movers loop comment
+    time.sleep(20)  # staggered so background threads don't all burst-fetch simultaneously at boot, competing for this host's 0.5 CPU
     while True:
         try:
             fetch_gold_all()
@@ -1617,7 +1230,7 @@ def fear_greed_debug():
 
 def _fear_greed_background_loop():
     print("[fear_greed] background thread started", flush=True)
-    time.sleep(24)  # staggered — see movers loop comment
+    time.sleep(24)  # staggered so background threads don't all burst-fetch simultaneously at boot, competing for this host's 0.5 CPU
     while True:
         try:
             fetch_fear_greed()
@@ -1776,7 +1389,7 @@ def fed_calendar_debug():
 
 def _fed_background_loop():
     print("[fed] background thread started", flush=True)
-    time.sleep(25)  # staggered — see movers loop comment
+    time.sleep(25)  # staggered so background threads don't all burst-fetch simultaneously at boot, competing for this host's 0.5 CPU
     while True:
         if FRED_API_KEY:
             try:

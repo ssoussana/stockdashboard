@@ -243,14 +243,6 @@
       <div class="movers-list" id="earningsList"><div class="movers-empty">Loading&hellip;</div></div>
     </div>
     <div class="movers-col">
-      <h2>Top Gainers</h2>
-      <div class="movers-list" id="gainersList"><div class="movers-empty">Loading&hellip;</div></div>
-    </div>
-    <div class="movers-col">
-      <h2>Top Losers</h2>
-      <div class="movers-list" id="losersList"><div class="movers-empty">Loading&hellip;</div></div>
-    </div>
-    <div class="movers-col">
       <h2>Fed Calendar</h2>
       <div class="movers-list" id="fedCalendarList"><div class="movers-empty">Loading&hellip;</div></div>
     </div>
@@ -709,40 +701,6 @@ async function refreshAll(){
   state.secondsLeft = REFRESH_MS/1000;
 }
 
-// ---------- Market movers ----------
-function renderMoversList(containerId, items, error){
-  const el = document.getElementById(containerId);
-  if(error){
-    el.innerHTML = `<div class="movers-empty">${error}</div>`;
-    return;
-  }
-  if(!items || !items.length){
-    el.innerHTML = `<div class="movers-empty">No data</div>`;
-    return;
-  }
-  el.innerHTML = items.map(m => {
-    const pct = m.changesPercentage;
-    const up = pct >= 0;
-    const pctStr = pct != null ? `${up?'+':''}${pct.toFixed(2)}%` : '&mdash;';
-    return `<div class="movers-row">
-      <span><span class="sym">${symLink(m.symbol)}${tradeLink(m.symbol)}</span><span class="name">${m.name || ''}</span></span>
-      <span class="pct ${up?'up':'down'}">${pctStr}</span>
-    </div>`;
-  }).join('');
-}
-
-async function refreshMovers(){
-  try{
-    const res = await fetch('/api/movers');
-    const data = await res.json();
-    renderMoversList('gainersList', data.gainers, data.error);
-    renderMoversList('losersList', data.losers, data.error);
-  }catch(e){
-    renderMoversList('gainersList', null, 'unavailable');
-    renderMoversList('losersList', null, 'unavailable');
-  }
-}
-
 // ---------- Upcoming earnings ----------
 function symLink(sym){
   return `<a href="https://finance.yahoo.com/quote/${encodeURIComponent(sym)}" target="_blank" rel="noopener noreferrer" class="sym-link">${sym}</a>`;
@@ -1069,14 +1027,12 @@ if('serviceWorker' in navigator){
   buildCards();
   refreshAll();
   refreshSma();
-  refreshMovers();
   refreshEarnings();
   refreshPE();
   refreshGold();
   refreshFedCalendar();
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
-  setInterval(refreshMovers, 15 * 60 * 1000);
   setInterval(refreshEarnings, 60 * 60 * 1000);
   setInterval(refreshPE, 60 * 60 * 1000);
   setInterval(refreshGold, 60 * 60 * 1000);
