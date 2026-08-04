@@ -1214,7 +1214,12 @@ def fetch_fear_greed():
 def fear_greed():
     if _fear_greed_cache.get("data") is None:
         return jsonify({"ok": False, "error": "not fetched yet"})
-    return jsonify(_fear_greed_cache["data"])
+    # Merge in the actual server-side fetch time, same reasoning as the
+    # index tooltip fix — the frontend previously had no way to show
+    # when this was genuinely last refreshed.
+    payload = dict(_fear_greed_cache["data"])
+    payload["fetched_at"] = _fear_greed_cache["ts"]
+    return jsonify(payload)
 
 
 @app.route("/api/debug/fear-greed")

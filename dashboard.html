@@ -578,7 +578,8 @@ async function refreshFearGreed(){
     document.getElementById('needle').style.transform = `rotate(${angle}deg)`;
 
     const compLines = d.score.components.map(c => `${c.name}: ${c.val}`).join('\n');
-    document.getElementById('gaugeWrap').title = compLines;
+    const fetchedLine = d.fetched_at ? `\nData fetched ${new Date(d.fetched_at * 1000).toLocaleString()}` : '';
+    document.getElementById('gaugeWrap').title = compLines + fetchedLine;
 
     // The backend already enforces the "don't fetch fresh external data
     // outside market hours" rule (it just re-serves its last cached value
