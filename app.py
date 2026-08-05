@@ -1596,8 +1596,20 @@ def fed_probabilities():
 
 @app.route("/api/debug/fed-probabilities")
 def fed_prob_debug():
+    computed = None
+    computed_error = None
+    if _fed_prob_cache["data"]:
+        try:
+            computed = compute_fed_meeting_outcomes(_fed_prob_cache["data"].get("events", {}))
+        except Exception as e:
+            computed_error = str(e)
     return jsonify({
         "cache_seconds_old": round(time.time() - _fed_prob_cache["ts"], 1) if _fed_prob_cache["data"] else None,
+        # Computed outcomes shown FIRST and directly from the same raw
+        # data below — no need to hand-transcribe the ladder to check
+        # whether they actually match what's being served to the dashboard.
+        "computed_from_this_raw_data": computed,
+        "computed_error": computed_error,
         "cached_data": _fed_prob_cache["data"],
         "last_attempt_seconds_ago": round(time.time() - _fed_prob_status["last_attempt"], 1) if _fed_prob_status["last_attempt"] else None,
         "last_error": _fed_prob_status["last_error"],
