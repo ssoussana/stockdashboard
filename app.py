@@ -437,6 +437,9 @@ def acquire_twelvedata_credits(n):
         waited += 2
 
 
+_twelvedata_executor = ThreadPoolExecutor(max_workers=2)
+
+
 def twelvedata_get(url, params, timeout=(5, 15)):
     """GET with one automatic retry on a 429. Our credit tracker only
     knows about calls made by *this* process — during a Render deploy
@@ -444,13 +447,29 @@ def twelvedata_get(url, params, timeout=(5, 15)):
     same time, each thinking it has the full budget, and together exceed
     the real account-wide limit. That's a real, if narrow, gap in a
     purely in-memory rate limiter; retrying once after a short wait
-    covers it without needing a shared external store."""
-    r = _http.get(url, params=params, timeout=timeout)
-    if r.status_code == 429:
-        print(f"[twelvedata] 429 rate limited, waiting 20s and retrying once: {url}", flush=True)
-        time.sleep(20)
+    covers it without needing a shared external store.
+
+    Wrapped in a hard-enforced 45s timeout from the OUTSIDE — this host
+    has shown before (FMP/movers) that requests' own connect/read
+    timeouts aren't reliably enforced, almost certainly a DNS resolution
+    hang that those timeout parameters don't cover. Without this, a
+    single hung request freezes the entire sequential SMA batch loop
+    forever — confirmed via a real incident where a batch sat stuck on
+    "acquiring credits" for 9+ hours, actually hung downstream in this
+    exact call, silently blocking every symbol queued after it."""
+    def _do_request():
         r = _http.get(url, params=params, timeout=timeout)
-    return r
+        if r.status_code == 429:
+            print(f"[twelvedata] 429 rate limited, waiting 20s and retrying once: {url}", flush=True)
+            time.sleep(20)
+            r = _http.get(url, params=params, timeout=timeout)
+        return r
+
+    future = _twelvedata_executor.submit(_do_request)
+    try:
+        return future.result(timeout=45)  # generous — covers the possible 20s 429-retry pause
+    except FutureTimeoutError:
+        raise TimeoutError(f"Twelve Data request hard-timed-out after 45s (likely a DNS/network hang): {url}")
 
 
 def compute_rsi14(closes, period=14):
