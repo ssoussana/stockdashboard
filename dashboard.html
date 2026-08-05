@@ -111,6 +111,7 @@
   .earn-row{padding:4px 0;border-bottom:1px solid var(--border);}
   .earn-row:last-child{border-bottom:none;}
   .earn-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:12px;color:var(--muted);padding-bottom:4px;}
+  .fed-odds-text{font-family:var(--mono);font-size:13px;color:var(--text);cursor:help;}
   #earningsList{max-height:225px;overflow-y:auto;}
   #fedCalendarList{max-height:225px;overflow-y:auto;}
   .earn-stats .up{color:var(--green);}
@@ -836,16 +837,35 @@ async function refreshFedCalendar(){
     // substitute for CME FedWatch, which requires a paid enterprise API.
     if(fedProbData && fedProbData.ok && fedProbData.meetings && fedProbData.meetings.length){
       const todayIso = today.toISOString().slice(0,10);
-      const nextMeeting = fedProbData.meetings.find(m => m.date >= todayIso) || fedProbData.meetings[0];
+      const upcoming = fedProbData.meetings.filter(m => m.date >= todayIso);
+      const nextMeeting = upcoming[0] || fedProbData.meetings[0];
       if(nextMeeting && nextMeeting.outcomes && nextMeeting.outcomes.length){
         const topOutcomes = nextMeeting.outcomes.slice(0,2)
           .map(o => `${o.range} ${o.probability.toFixed(0)}%`)
           .join(' \u00b7 ');
+
+        // Hover tooltip: the next couple of meetings after this one, same
+        // "top 2 outcomes" format. Kalshi's contracts are all priced
+        // against TODAY's rate (not "what will that specific meeting do
+        // in isolation") — cumulative, same as CME FedWatch's aggregated
+        // view — so later meetings naturally show wider/different odds
+        // as they bake in more time for the rate to have moved.
+        const laterMeetings = upcoming.slice(1, 3);
+        let tooltip = 'Odds are cumulative vs. today\'s rate (like CME FedWatch\'s aggregated view), not this meeting in isolation.';
+        if(laterMeetings.length){
+          const laterLines = laterMeetings.map(m => {
+            const label = new Date(m.date + 'T00:00:00').toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
+            const outcomesStr = m.outcomes.slice(0,2).map(o => `${o.range} ${o.probability.toFixed(0)}%`).join(' \u00b7 ');
+            return `${label}: ${outcomesStr}`;
+          });
+          tooltip += '\n\n' + laterLines.join('\n');
+        }
+
         html.push(`<div class="earn-row">
           <div class="movers-row" style="border-bottom:none;padding-bottom:2px;">
             <span><span class="sym" style="font-size:12px;">Market Odds</span></span>
           </div>
-          <div class="earn-stats"><span class="stat">${topOutcomes}</span></div>
+          <div class="earn-stats"><span class="fed-odds-text" title="${tooltip.replace(/"/g,'&quot;')}">${topOutcomes}</span></div>
         </div>`);
       }
     }
