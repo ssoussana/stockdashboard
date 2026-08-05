@@ -757,6 +757,15 @@ async function refreshFedCalendar(){
     const data = await res.json();
     const today = new Date(); today.setHours(0,0,0,0);
 
+    // Fetched separately and tolerated independently — if Kalshi's API
+    // has a hiccup, the rest of the Fed Calendar panel (CPI/PPI/jobs/
+    // next meeting date) should still render fine without it.
+    let fedProbData = null;
+    try{
+      const probRes = await fetch('/api/fed-probabilities');
+      fedProbData = await probRes.json();
+    }catch(e){ /* non-fatal — Market Odds line just won't show */ }
+
     const html = [];
 
     function formatLastValue(info){
@@ -820,6 +829,25 @@ async function refreshFedCalendar(){
         <span><span class="sym">Next FOMC</span><span class="name">${startStr}\u2013${endStr}</span></span>
         <span class="pct">${daysAwayLabel(dStart, today)}</span>
       </div>`);
+    }
+
+    // Market-implied odds for the nearest upcoming meeting, from Kalshi's
+    // KXFED prediction market (real-money, CFTC-regulated) — a free
+    // substitute for CME FedWatch, which requires a paid enterprise API.
+    if(fedProbData && fedProbData.ok && fedProbData.meetings && fedProbData.meetings.length){
+      const todayIso = today.toISOString().slice(0,10);
+      const nextMeeting = fedProbData.meetings.find(m => m.date >= todayIso) || fedProbData.meetings[0];
+      if(nextMeeting && nextMeeting.outcomes && nextMeeting.outcomes.length){
+        const topOutcomes = nextMeeting.outcomes.slice(0,2)
+          .map(o => `${o.range} ${o.probability.toFixed(0)}%`)
+          .join(' \u00b7 ');
+        html.push(`<div class="earn-row">
+          <div class="movers-row" style="border-bottom:none;padding-bottom:2px;">
+            <span><span class="sym" style="font-size:12px;">Market Odds</span></span>
+          </div>
+          <div class="earn-stats"><span class="stat">${topOutcomes}</span></div>
+        </div>`);
+      }
     }
 
     const content = html.filter(Boolean).join('');

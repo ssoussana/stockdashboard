@@ -1496,6 +1496,104 @@ def fetch_fed_probabilities():
         raise
 
 
+def compute_fed_meeting_outcomes(events_dict):
+    """Kalshi's KXFED series doesn't expose discrete hike/hold/cut
+    contracts directly — it's a ladder of "will the upper bound be above
+    X%" cumulative threshold markets (e.g. Above 3.75%, Above 3.50%,
+    Above 3.25%, ...). This converts that ladder into discrete bucket
+    probabilities per meeting (e.g. "ends at 3.50-3.75%: 50%") by taking
+    the difference between adjacent thresholds' implied probabilities —
+    the standard way to derive a distribution from a cumulative
+    strike ladder. Uses the bid/ask midpoint rather than just the bid,
+    since the bid alone is biased low by the spread.
+
+    Deliberately doesn't try to label buckets as "hold" vs "hike" vs
+    "cut" — that requires knowing the current Fed funds rate as a
+    baseline, which would need separate upkeep as the Fed acts over
+    time (the same kind of manual-maintenance burden already flagged
+    for the FOMC meeting schedule). Showing the actual resulting rate
+    range instead avoids that fragility."""
+    meetings = []
+    for event_ticker, markets in events_dict.items():
+        parsed = []
+        for m in markets:
+            ticker = m.get("ticker", "") or ""
+            match = re.search(r"-T([\d.]+)$", ticker)
+            if not match:
+                continue
+            try:
+                threshold = float(match.group(1))
+            except ValueError:
+                continue
+
+            bid = m.get("yes_bid_dollars")
+            ask = m.get("yes_ask_dollars")
+            try:
+                bid_f = float(bid) if bid is not None else None
+            except (TypeError, ValueError):
+                bid_f = None
+            try:
+                ask_f = float(ask) if ask is not None else None
+            except (TypeError, ValueError):
+                ask_f = None
+
+            if bid_f is not None and ask_f is not None:
+                prob_above = (bid_f + ask_f) / 2 * 100
+            elif bid_f is not None:
+                prob_above = bid_f * 100
+            else:
+                continue
+
+            parsed.append({"threshold": threshold, "prob_above": prob_above, "close_time": m.get("close_time")})
+
+        if not parsed:
+            continue
+
+        parsed.sort(key=lambda x: x["threshold"])  # ascending
+        close_time = parsed[0]["close_time"]
+        meeting_date = close_time[:10] if close_time else None
+
+        buckets = []
+        n = len(parsed)
+        for i, entry in enumerate(parsed):
+            if i == n - 1:
+                # Highest threshold's own probability IS the "ends above this" tail bucket.
+                bucket_prob = entry["prob_above"]
+                range_label = f"above {entry['threshold']:.2f}%"
+            else:
+                nxt = parsed[i + 1]  # next-higher threshold
+                # P(ends in (this, next]) = P(above this) - P(above next).
+                # max(0, ...) guards against tiny negative noise from the
+                # bid/ask spread — probabilities should be non-decreasing
+                # as the threshold falls, but real market quotes aren't
+                # perfectly monotonic tick to tick.
+                bucket_prob = max(0.0, entry["prob_above"] - nxt["prob_above"])
+                range_label = f"{entry['threshold']:.2f}\u2013{nxt['threshold']:.2f}%"
+            if bucket_prob >= 0.5:  # drop negligible/noise-level buckets
+                buckets.append({"range": range_label, "probability": round(bucket_prob, 1)})
+
+        buckets.sort(key=lambda b: b["probability"], reverse=True)
+        meetings.append({
+            "event_ticker": event_ticker,
+            "date": meeting_date,
+            "outcomes": buckets[:5],
+        })
+
+    meetings.sort(key=lambda m: m["date"] or "9999-99-99")
+    return meetings
+
+
+@app.route("/api/fed-probabilities")
+def fed_probabilities():
+    if _fed_prob_cache["data"] is None:
+        return jsonify({"ok": False, "error": "not fetched yet"})
+    try:
+        meetings = compute_fed_meeting_outcomes(_fed_prob_cache["data"].get("events", {}))
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"computation failed: {e}"})
+    return jsonify({"ok": True, "meetings": meetings, "fetched_at": _fed_prob_cache["ts"]})
+
+
 @app.route("/api/debug/fed-probabilities")
 def fed_prob_debug():
     return jsonify({
