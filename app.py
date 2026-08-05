@@ -1273,6 +1273,11 @@ _fed_cache = load_json_cache("fed_cache.json")
 # FRED release IDs (fixed, don't change): CPI = 10, PPI = 46.
 FRED_RELEASE_IDS = {"cpi": 10, "ppi": 46, "jobs": 50}  # Employment Situation = 50
 FRED_LAST_VALUE_SERIES = {"cpi_last": "CPILFESL", "ppi_last": "PPICOR", "jobs_last": "PAYEMS"}
+# Current Fed funds target range — used as the baseline to classify
+# Kalshi's KXFED outcomes as hold/hike/cut, and to show "current: X-Y%"
+# alongside Market Odds. Updates same-day whenever the Fed actually
+# changes rates (unlike the FOMC meeting schedule, no manual upkeep needed).
+FRED_RATE_SERIES = {"fed_funds_upper": "DFEDTARU", "fed_funds_lower": "DFEDTARL"}
 
 # FOMC meeting dates aren't a "data release" FRED tracks, so this is a
 # maintained schedule instead — sourced from the Federal Reserve's own
@@ -1370,6 +1375,14 @@ def fetch_fed_calendar():
                 print(f"[fed] {key} ({series_id}) failed: {e!r}", flush=True)
                 out[key] = {"ok": False, "error": str(e)}
 
+        for key, series_id in FRED_RATE_SERIES.items():
+            try:
+                r = fetch_fred_series(series_id)
+                out[key] = {"ok": True, "value": r["value"], "date": r["date"]}
+            except Exception as e:
+                print(f"[fed] {key} ({series_id}) failed: {e!r}", flush=True)
+                out[key] = {"ok": False, "error": str(e)}
+
         _fed_cache["data"] = out
         _fed_cache["ts"] = time.time()
         save_json_cache("fed_cache.json", _fed_cache)
@@ -1392,7 +1405,7 @@ def fed_calendar():
             "fomc": {"ok": True, **(next_fomc_meeting() or {"start": None, "end": None})},
         })
     if _fed_cache.get("data") is None:
-        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "jobs", "fomc", "cpi_last", "ppi_last", "jobs_last")})
+        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "jobs", "fomc", "cpi_last", "ppi_last", "jobs_last", "fed_funds_upper", "fed_funds_lower")})
     return jsonify(_fed_cache["data"])
 
 
@@ -1507,12 +1520,10 @@ def compute_fed_meeting_outcomes(events_dict):
     strike ladder. Uses the bid/ask midpoint rather than just the bid,
     since the bid alone is biased low by the spread.
 
-    Deliberately doesn't try to label buckets as "hold" vs "hike" vs
-    "cut" — that requires knowing the current Fed funds rate as a
-    baseline, which would need separate upkeep as the Fed acts over
-    time (the same kind of manual-maintenance burden already flagged
-    for the FOMC meeting schedule). Showing the actual resulting rate
-    range instead avoids that fragility."""
+    Each bucket includes numeric lower/upper bounds (not just the display
+    string) so callers can classify buckets as hold/hike/cut against the
+    current Fed funds rate (fetched from FRED, see FRED_RATE_SERIES)
+    without re-parsing formatted range text."""
     meetings = []
     for event_ticker, markets in events_dict.items():
         parsed = []
@@ -1560,6 +1571,7 @@ def compute_fed_meeting_outcomes(events_dict):
                 # Highest threshold's own probability IS the "ends above this" tail bucket.
                 bucket_prob = entry["prob_above"]
                 range_label = f"above {entry['threshold']:.2f}%"
+                lower, upper = entry["threshold"], None
             else:
                 nxt = parsed[i + 1]  # next-higher threshold
                 # P(ends in (this, next]) = P(above this) - P(above next).
@@ -1569,8 +1581,9 @@ def compute_fed_meeting_outcomes(events_dict):
                 # perfectly monotonic tick to tick.
                 bucket_prob = max(0.0, entry["prob_above"] - nxt["prob_above"])
                 range_label = f"{entry['threshold']:.2f}\u2013{nxt['threshold']:.2f}%"
+                lower, upper = entry["threshold"], nxt["threshold"]
             if bucket_prob >= 0.5:  # drop negligible/noise-level buckets
-                buckets.append({"range": range_label, "probability": round(bucket_prob, 1)})
+                buckets.append({"range": range_label, "probability": round(bucket_prob, 1), "lower": lower, "upper": upper})
 
         buckets.sort(key=lambda b: b["probability"], reverse=True)
         meetings.append({
@@ -1591,7 +1604,35 @@ def fed_probabilities():
         meetings = compute_fed_meeting_outcomes(_fed_prob_cache["data"].get("events", {}))
     except Exception as e:
         return jsonify({"ok": False, "error": f"computation failed: {e}"})
-    return jsonify({"ok": True, "meetings": meetings, "fetched_at": _fed_prob_cache["ts"]})
+
+    # Current Fed funds range, from FRED (fetched alongside CPI/PPI/jobs
+    # in fetch_fed_calendar) — used to classify each outcome bucket as
+    # hold/hike/cut, and to show "current: X-Y%" next to Market Odds.
+    fed_data = _fed_cache.get("data") or {}
+    upper_info = fed_data.get("fed_funds_upper") or {}
+    lower_info = fed_data.get("fed_funds_lower") or {}
+    current_upper = upper_info.get("value") if upper_info.get("ok") else None
+    current_lower = lower_info.get("value") if lower_info.get("ok") else None
+
+    if current_upper is not None and current_lower is not None:
+        for meeting in meetings:
+            for outcome in meeting["outcomes"]:
+                lo, hi = outcome["lower"], outcome["upper"]
+                if lo == current_lower and hi == current_upper:
+                    outcome["direction"] = "hold"
+                elif lo >= current_upper:
+                    outcome["direction"] = "hike"
+                elif hi is not None and hi <= current_lower:
+                    outcome["direction"] = "cut"
+                else:
+                    outcome["direction"] = "other"  # spans the current range unevenly — shouldn't normally happen with 25bp-aligned buckets
+
+    return jsonify({
+        "ok": True,
+        "meetings": meetings,
+        "fetched_at": _fed_prob_cache["ts"],
+        "current_rate": {"lower": current_lower, "upper": current_upper} if current_upper is not None else None,
+    })
 
 
 @app.route("/api/debug/fed-probabilities")
