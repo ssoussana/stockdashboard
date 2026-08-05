@@ -852,17 +852,23 @@ async function refreshFedCalendar(){
         const currentRateStr = cr && cr.lower != null && cr.upper != null
           ? `Current ${cr.lower.toFixed(2)}\u2013${cr.upper.toFixed(2)}% \u2192 ` : '';
 
-        // Color by aggregate hike vs. cut probability (using ALL outcomes
-        // returned, not just the top 2 shown) \u2014 red leans hike, green
-        // leans cut, white/neutral when neither clearly dominates.
+        // Color compares the SINGLE most-likely hike scenario and the
+        // single most-likely cut scenario against hold — i.e. exactly
+        // the numbers visible in topOutcomes above, not a sum across
+        // every tail bucket (including ones never shown on screen).
+        // A near-tie like "hold 49% / hike 49%" should read as neutral,
+        // since that's what the displayed numbers actually say.
         // 5-point neutral band: an assumption, not something Steve
-        // specified \u2014 easy to tune if it doesn't feel right in practice.
+        // specified — easy to tune if it doesn't feel right in practice.
         let oddsClass = '';
-        const hikeSum = nextMeeting.outcomes.filter(o => o.direction === 'hike').reduce((s,o) => s+o.probability, 0);
-        const cutSum = nextMeeting.outcomes.filter(o => o.direction === 'cut').reduce((s,o) => s+o.probability, 0);
         if(nextMeeting.outcomes.some(o => o.direction)){ // classification only present once current_rate is known
-          if(hikeSum - cutSum > 5) oddsClass = 'odds-hike';
-          else if(cutSum - hikeSum > 5) oddsClass = 'odds-cut';
+          const holdProb = (nextMeeting.outcomes.find(o => o.direction === 'hold') || {}).probability || 0;
+          const hikeOutcomes = nextMeeting.outcomes.filter(o => o.direction === 'hike');
+          const cutOutcomes = nextMeeting.outcomes.filter(o => o.direction === 'cut');
+          const topHikeProb = hikeOutcomes.length ? Math.max(...hikeOutcomes.map(o => o.probability)) : 0;
+          const topCutProb = cutOutcomes.length ? Math.max(...cutOutcomes.map(o => o.probability)) : 0;
+          if(topHikeProb - holdProb > 5) oddsClass = 'odds-hike';
+          else if(topCutProb - holdProb > 5) oddsClass = 'odds-cut';
           else oddsClass = 'odds-neutral';
         }
 
