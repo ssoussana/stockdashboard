@@ -1428,6 +1428,98 @@ def _fed_background_loop():
 threading.Thread(target=_fed_background_loop, daemon=True).start()
 
 
+# ---------- Fed rate decision probabilities (Kalshi prediction market) ----------
+# CME's real FedWatch API is a paid enterprise product (monthly
+# subscription, no public pricing) — not worth it for a personal
+# dashboard. This uses Kalshi instead: a CFTC-regulated, real-money
+# prediction market with a "KXFED" series specifically for Fed rate
+# decisions. Confirmed via live testing (2026-08-05) that Kalshi's
+# market-data read endpoints work with NO authentication required —
+# only placing trades needs an API key/signed requests, not reading
+# prices. A 2026 study (NBER working paper) found Kalshi's Fed-rate
+# predictions were at least as accurate as CME FedWatch and professional
+# forecasters, so this isn't just a free substitute — it's a
+# well-regarded one in its own right.
+#
+# This first pass just gets the raw data flowing into a debug endpoint.
+# Kalshi's exact grouping (event_ticker per FOMC meeting, one market per
+# possible outcome like "hold" / "hike 25bp" / "cut 25bp") needs to be
+# confirmed against real output before building the actual display —
+# same approach already used successfully for FMP's index/market-hours
+# endpoints earlier in this project.
+KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+KALSHI_FED_SERIES = "KXFED"
+FED_PROB_CACHE_SECONDS = 30 * 60  # prediction market prices don't need to be second-by-second fresh for this use
+FED_PROB_CACHE_FILE = "fed_prob_cache.json"
+_fed_prob_cache = load_json_cache(FED_PROB_CACHE_FILE) or {"data": None, "ts": 0}
+_fed_prob_status = {"last_attempt": None, "last_error": None}
+
+
+def fetch_fed_probabilities():
+    _fed_prob_status["last_attempt"] = time.time()
+    try:
+        r = _http.get(
+            f"{KALSHI_BASE_URL}/markets",
+            params={"series_ticker": KALSHI_FED_SERIES, "status": "open", "limit": 100},
+            timeout=(5, 15),
+        )
+        r.raise_for_status()
+        data = r.json()
+        markets = data.get("markets", [])
+
+        # Group by event_ticker — expected to be one group per FOMC
+        # meeting, containing several yes/no contracts for different
+        # rate outcomes at that meeting.
+        events = {}
+        for m in markets:
+            event_ticker = m.get("event_ticker")
+            if not event_ticker:
+                continue
+            events.setdefault(event_ticker, []).append({
+                "ticker": m.get("ticker"),
+                "title": m.get("title"),
+                "yes_sub_title": m.get("yes_sub_title"),
+                "yes_bid_dollars": m.get("yes_bid_dollars"),
+                "yes_ask_dollars": m.get("yes_ask_dollars"),
+                "volume_24h": m.get("volume_24h_fp"),
+                "close_time": m.get("close_time"),
+            })
+
+        _fed_prob_cache["data"] = {"events": events, "raw_market_count": len(markets)}
+        _fed_prob_cache["ts"] = time.time()
+        save_json_cache(FED_PROB_CACHE_FILE, _fed_prob_cache)
+        _fed_prob_status["last_error"] = None
+        print(f"[fed_prob] updated: {len(events)} event(s), {len(markets)} total market(s)", flush=True)
+    except Exception as e:
+        _fed_prob_status["last_error"] = str(e)
+        print(f"[fed_prob] fetch failed: {e!r}", flush=True)
+        raise
+
+
+@app.route("/api/debug/fed-probabilities")
+def fed_prob_debug():
+    return jsonify({
+        "cache_seconds_old": round(time.time() - _fed_prob_cache["ts"], 1) if _fed_prob_cache["data"] else None,
+        "cached_data": _fed_prob_cache["data"],
+        "last_attempt_seconds_ago": round(time.time() - _fed_prob_status["last_attempt"], 1) if _fed_prob_status["last_attempt"] else None,
+        "last_error": _fed_prob_status["last_error"],
+    })
+
+
+def _fed_prob_background_loop():
+    print("[fed_prob] background thread started", flush=True)
+    time.sleep(30)  # staggered so background threads don't all burst-fetch simultaneously at boot, competing for this host's 0.5 CPU
+    while True:
+        try:
+            fetch_fed_probabilities()
+        except Exception as e:
+            print(f"[fed_prob] fetch_fed_probabilities raised: {e!r}", flush=True)
+        time.sleep(FED_PROB_CACHE_SECONDS)
+
+
+threading.Thread(target=_fed_prob_background_loop, daemon=True).start()
+
+
 # ---------- Standalone diagnostics — not used by the dashboard itself ----------
 @app.route("/api/debug/twelvedata-symbol-search")
 def twelvedata_symbol_search_debug():
