@@ -1,0 +1,1125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Market Pulse</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0a0c10">
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0c10;
+    --panel:#12151b;
+    --panel-hi:#161a21;
+    --border:#20252e;
+    --text:#e7ebf2;
+    --muted:#7c8593;
+    --muted-dim:#535a66;
+    --green:#1fd67a;
+    --green-dim:#12472e;
+    --red:#ff4d63;
+    --red-dim:#4a1620;
+    --amber:#f2b84b;
+    --blue:#4d9eff;
+    --yellow:#e8d33d;
+    --lime:#a8d64b;
+    --sans:'Inter',system-ui,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      radial-gradient(1200px 600px at 15% -10%, #131722 0%, transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, #10151f 0%, transparent 55%),
+      var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    min-height:100vh;
+    padding:28px 20px 60px;
+  }
+  .wrap{max-width:1180px;margin:0 auto;}
+  @media (min-width:1500px){ .wrap{max-width:1500px;} }
+  @media (min-width:1900px){ .wrap{max-width:1900px;} }
+  @media (min-width:2300px){ .wrap{max-width:2200px;} }
+
+  /* Header */
+  header{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:22px;}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;color:var(--amber);text-transform:uppercase;margin:0 0 6px;}
+  h1{font-family:var(--sans);font-weight:800;font-size:30px;letter-spacing:-0.02em;margin:0;}
+  .sub{color:var(--muted);font-size:13px;margin-top:4px;font-family:var(--mono);}
+  .status{display:flex;align-items:center;gap:14px;font-family:var(--mono);font-size:12px;color:var(--muted);}
+  .status .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s ease-in-out infinite;}
+  @media (prefers-reduced-motion: reduce){.status .dot{animation:none;}}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+  button.refresh{
+    background:var(--panel-hi);border:1px solid var(--border);color:var(--text);
+    font-family:var(--mono);font-size:12px;padding:7px 12px;border-radius:6px;cursor:pointer;
+  }
+  button.refresh:hover{border-color:var(--muted-dim);}
+  button.refresh:focus-visible, input:focus-visible, button:focus-visible{outline:2px solid var(--amber);outline-offset:2px;}
+
+  /* Fear & Greed panel */
+  .top-panels{
+    display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:22px;
+    align-items:start;
+  }
+  @media (min-width:640px){ .top-panels{grid-template-columns:1fr 1fr;} }
+  @media (min-width:1500px){ .top-panels{grid-template-columns:260px 1fr 1fr 1fr 1fr;} }
+  .gauge-wrap{display:flex;flex-direction:column;align-items:center;cursor:help;}
+  .gauge-score{font-family:var(--sans);font-weight:800;font-size:44px;margin-top:-38px;letter-spacing:-0.02em;}
+  .gauge-label{font-family:var(--mono);font-size:13px;letter-spacing:.06em;margin-top:2px;}
+  .needle{transition:transform 1s cubic-bezier(.4,1.4,.4,1);transform-origin:100px 100px;}
+  @media (prefers-reduced-motion: reduce){.needle{transition:none;}}
+
+  /* Index strip */
+  .index-strip{
+    display:flex;gap:24px;flex-wrap:wrap;
+    padding:10px 24px 22px;margin-top:-10px;margin-bottom:22px;
+    font-family:var(--mono);font-size:14px;color:var(--text);
+  }
+  @media (min-width:1500px){
+    .index-strip{flex-wrap:nowrap;overflow-x:auto;gap:22px;}
+  }
+  .index-strip .idx{display:flex;align-items:baseline;gap:8px;white-space:nowrap;flex-shrink:0;}
+  a.hormuz-link{text-decoration:none;color:inherit;cursor:pointer;}
+  a.hormuz-link:hover .val{color:var(--amber);text-decoration:underline;}
+  #indexStripCore{display:contents;}
+  .index-strip .idx .name{color:var(--muted);font-weight:600;}
+  .index-strip .idx .val{color:var(--text);font-weight:600;}
+  .index-strip .idx .chg.up{color:var(--green);}
+  .index-strip .idx .chg.down{color:var(--red);}
+
+  /* Market movers */
+  .movers-col{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;}
+  .movers-col h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;font-family:var(--mono);font-weight:600;}
+  .movers-empty{font-family:var(--mono);font-size:12px;color:var(--muted);padding:6px 0;}
+  .movers-row{
+    display:flex;justify-content:space-between;align-items:center;
+    padding:7px 0;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:12.5px;
+  }
+  .movers-row:last-child{border-bottom:none;}
+  .movers-row .sym{font-weight:700;color:var(--text);}
+  .movers-row .name{color:var(--muted);font-size:12px;margin-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px;display:inline-block;vertical-align:bottom;}
+  .movers-row .pct{font-weight:600;}
+  .movers-row .pct.up{color:var(--green);}
+  .movers-row .pct.down{color:var(--red);}
+  .earn-row{padding:4px 0;border-bottom:1px solid var(--border);}
+  .earn-row:last-child{border-bottom:none;}
+  .earn-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:12px;color:var(--muted);padding-bottom:4px;}
+  .fed-odds-text{font-family:var(--mono);font-size:13px;color:var(--text);cursor:help;}
+  .fed-odds-text.odds-hike{color:var(--red);}
+  .fed-odds-text.odds-cut{color:var(--green);}
+  .fed-odds-text.odds-neutral{color:var(--text);}
+  #earningsList{max-height:225px;overflow-y:auto;}
+  #fedCalendarList{max-height:225px;overflow-y:auto;}
+  .earn-stats .up{color:var(--green);}
+  .earn-stats .down{color:var(--red);}
+
+  /* Stock grid */
+  .grid-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:16px;flex-wrap:wrap;}
+  .grid-head h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0;font-family:var(--mono);font-weight:600;}
+  .add-box{position:relative;}
+  .add-box input{
+    background:var(--panel);border:1px solid var(--border);color:var(--text);
+    font-family:var(--mono);font-size:13px;padding:7px 10px;border-radius:6px;width:220px;
+  }
+  .add-box input::placeholder{color:var(--muted-dim);}
+  .suggestions{
+    position:absolute;top:calc(100% + 4px);right:0;width:280px;
+    background:var(--panel-hi);border:1px solid var(--border);border-radius:8px;
+    box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:10;overflow:hidden;display:none;
+  }
+  .suggestions.open{display:block;}
+  .suggestions .opt{
+    padding:9px 12px;cursor:pointer;display:flex;justify-content:space-between;gap:10px;
+    font-family:var(--mono);font-size:12.5px;border-bottom:1px solid var(--border);
+  }
+  .suggestions .opt:last-child{border-bottom:none;}
+  .suggestions .opt:hover, .suggestions .opt.active{background:var(--bg);}
+  .suggestions .opt .sym{font-size:12.5px;}
+  .suggestions .opt .desc{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px;}
+  .suggestions .empty{padding:10px 12px;color:var(--muted-dim);font-family:var(--mono);font-size:12px;}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;}
+  .card{
+    background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;
+    position:relative;overflow:hidden;
+  }
+  .card .bar{position:absolute;left:0;top:0;bottom:0;width:3px;}
+  .card.up .bar{background:var(--green);}
+  .card.down .bar{background:var(--red);}
+  .card .row1{display:flex;justify-content:space-between;align-items:flex-start;}
+  .sym{font-family:var(--mono);font-weight:700;font-size:18px;letter-spacing:.02em;}
+  .sym-link{color:inherit;text-decoration:none;}
+  .sym-link:hover{text-decoration:underline;color:var(--amber);}
+  .sym-link:focus-visible{outline:2px solid var(--amber);outline-offset:2px;}
+  .trade-link{color:var(--green);text-decoration:none;font-size:19px;line-height:1;
+    display:inline-flex;align-items:center;justify-content:center;
+    width:30px;height:30px;margin-left:2px;vertical-align:middle;
+    border-radius:6px;opacity:.85;}
+  .trade-link:hover,.trade-link:active{opacity:1;background:rgba(31,214,122,.15);text-decoration:none;}
+  .trade-link:focus-visible{outline:2px solid var(--amber);outline-offset:2px;}
+  .row1-right{display:flex;align-items:center;gap:8px;}
+  .remove-btn{
+    background:none;border:none;color:var(--muted-dim);font-family:var(--mono);
+    font-size:15px;line-height:1;cursor:pointer;padding:2px 4px;border-radius:4px;
+  }
+  .remove-btn:hover{color:var(--red);background:var(--red-dim);}
+  .price{font-family:var(--sans);font-weight:700;font-size:22px;margin-top:6px;}
+  .pe-ratio{font-family:var(--sans);font-weight:400;font-size:13px;color:var(--muted);margin-left:6px;}
+  .pe-ratio.pe-low{color:var(--green);}
+  .pe-ratio.pe-healthy{color:var(--blue);}
+  .pe-ratio.pe-high{color:var(--amber);}
+  .pe-ratio.pe-extreme{color:var(--red);}
+  .price.signal-below{color:var(--green);}
+  .price.signal-mixed{color:var(--blue);}
+  .price.signal-above{color:var(--yellow);}
+  .price.signal-extended{color:var(--red);}
+  .chg{font-family:var(--mono);font-size:12.5px;margin-top:3px;}
+  .chg.up{color:var(--green);}
+  .chg.down{color:var(--red);}
+  .spark{margin-top:8px;display:block;}
+  .sma{
+    margin-top:8px;padding-top:8px;border-top:1px solid var(--border);
+    font-family:var(--mono);font-size:11px;color:var(--muted);
+    display:flex;flex-wrap:wrap;gap:4px 10px;
+  }
+  .sma .stat{white-space:nowrap;}
+  .sma .up{color:var(--red);}
+  .sma .down{color:var(--green);}
+  .sma .rsi-hot{color:var(--red);}
+  .sma .rsi-cold{color:var(--green);}
+  .sma .rsi-warn-hot{color:var(--amber);}
+  .sma .rsi-warn-cold{color:var(--lime);}
+  .card .status-pill{font-family:var(--mono);font-size:10px;color:var(--muted-dim);}
+  .card.err{opacity:.55;}
+  .card.err .price{color:var(--muted);font-size:13px;}
+
+  footer{margin-top:30px;text-align:center;color:var(--muted-dim);font-family:var(--mono);font-size:11px;}
+  footer a{color:var(--muted);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <p class="eyebrow">AI Infrastructure Watch</p>
+      <h1>Market Pulse</h1>
+      <p class="sub"><span id="tickerCount">13</span> tickers &middot; sentiment gauge &middot; auto-refresh every 1 min</p>
+    </div>
+    <div class="status">
+      <span class="dot"></span>
+      <span id="updated">not loaded yet</span>
+      <span id="countdown"></span>
+      <button class="refresh" id="refreshBtn">Refresh now</button>
+    </div>
+  </header>
+
+  <div class="top-panels">
+    <div class="movers-col">
+      <div class="gauge-wrap" id="gaugeWrap" title="Loading sentiment breakdown…">
+        <h2 style="align-self:flex-start;">Sentiment</h2>
+        <svg width="200" height="120" viewBox="0 0 200 120">
+          <defs>
+            <linearGradient id="arcGrad" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#ff4d63"/>
+              <stop offset="25%" stop-color="#f2854b"/>
+              <stop offset="50%" stop-color="#f2d24b"/>
+              <stop offset="75%" stop-color="#a8d64b"/>
+              <stop offset="100%" stop-color="#1fd67a"/>
+            </linearGradient>
+          </defs>
+          <path d="M 15 100 A 85 85 0 0 1 185 100" fill="none" stroke="url(#arcGrad)" stroke-width="10" stroke-linecap="round"/>
+          <line id="needle" class="needle" x1="100" y1="100" x2="100" y2="28" stroke="#e7ebf2" stroke-width="3" stroke-linecap="round" transform="rotate(-90 100 100)"/>
+          <circle cx="100" cy="100" r="5" fill="#e7ebf2"/>
+        </svg>
+        <div class="gauge-score" id="fgScore">&mdash;</div>
+        <div class="gauge-label" id="fgLabel" style="color:var(--muted);">Loading&hellip;</div>
+      </div>
+    </div>
+    <div class="movers-col">
+      <h2>Earnings (Watchlist)</h2>
+      <div class="movers-list" id="earningsList"><div class="movers-empty">Loading&hellip;</div></div>
+    </div>
+    <div class="movers-col">
+      <h2>Fed Calendar</h2>
+      <div class="movers-list" id="fedCalendarList"><div class="movers-empty">Loading&hellip;</div></div>
+    </div>
+  </div>
+
+  <div class="index-strip" id="indexStrip">
+    <span id="indexStripCore">
+      <span class="idx"><span class="name">DOW</span> <span class="val">&mdash;</span></span>
+      <span class="idx"><span class="name">NASDAQ</span> <span class="val">&mdash;</span></span>
+      <span class="idx"><span class="name">S&amp;P 500</span> <span class="val">&mdash;</span></span>
+    </span>
+    <span class="idx" title="Gold spot price per troy ounce — updates hourly"><span class="name">GOLD</span> <span class="val" id="goldVal">&mdash;</span></span>
+    <span class="idx" title="Silver spot price per troy ounce — updates hourly"><span class="name">SILVER</span> <span class="val" id="silverVal">&mdash;</span></span>
+    <span class="idx" title="Bitcoin price — updates hourly"><span class="name">BITCOIN</span> <span class="val" id="bitcoinVal">&mdash;</span></span>
+  </div>
+
+  <div class="grid-head">
+    <h2>Watchlist</h2>
+    <div class="add-box">
+      <input type="text" id="addInput" placeholder="Add a ticker or company&hellip;" autocomplete="off">
+      <div class="suggestions" id="suggestions"></div>
+    </div>
+  </div>
+  <div class="grid" id="stockGrid"></div>
+
+  <footer>
+    Quotes via Finnhub &middot; Sentiment via feargreedchart.com &middot; Sparklines reflect this session only<br>
+    Price color: green below both SMAs, blue below 15% over the 20d SMA, yellow 15-20% over, red 20%+ over &middot; RSI: green &le;30 (oversold), red &ge;70 (overbought) &middot; not financial advice
+  </footer>
+</div>
+
+<script>
+const DEFAULT_SYMBOLS = ["PLTR","NVDA","CLS","NBIS","HOOD","SPY","QQQ","GLW","CRDO","COHR","SOXL","DRAM","IREN"];
+
+async function loadSharedWatchlist(){
+  try{
+    const res = await fetch('/api/watchlist');
+    const data = await res.json();
+    if(Array.isArray(data.symbols) && data.symbols.length) return data.symbols;
+  }catch(e){ /* fall through to default */ }
+  return [...DEFAULT_SYMBOLS];
+}
+
+let SYMBOLS = [...DEFAULT_SYMBOLS]; // placeholder until loadSharedWatchlist() resolves in init()
+const REFRESH_MS = 60 * 1000;
+const state = { history: {}, sma: null, lastPrice: {}, lastPct: {}, secondsLeft: REFRESH_MS/1000 };
+
+const grid = document.getElementById('stockGrid');
+const updatedEl = document.getElementById('updated');
+const countdownEl = document.getElementById('countdown');
+
+// ---------- card scaffolding ----------
+function buildCards(){
+  document.getElementById('tickerCount').textContent = SYMBOLS.length;
+  grid.innerHTML = SYMBOLS.map(sym => `
+    <div class="card" id="card-${sym}">
+      <div class="bar"></div>
+      <div class="row1">
+        <span class="sym">${symLink(sym)}${tradeLink(sym)}</span>
+        <div class="row1-right">
+          <span class="status-pill" id="pill-${sym}"></span>
+          <button class="remove-btn" data-sym="${sym}" title="Remove ${sym}" aria-label="Remove ${sym}">&times;</button>
+        </div>
+      </div>
+      <span class="price" id="price-${sym}">&mdash;</span><span class="pe-ratio" id="pe-${sym}"></span>
+      <div class="chg" id="chg-${sym}">waiting for data</div>
+      <svg class="spark" id="spark-${sym}" width="100%" height="30" viewBox="0 0 200 30" preserveAspectRatio="none"></svg>
+      <div class="sma" id="sma-${sym}">SMA loading&hellip;</div>
+    </div>
+  `).join('');
+
+  grid.querySelectorAll('.remove-btn').forEach(btn => {
+    btn.addEventListener('click', () => removeSymbol(btn.dataset.sym));
+  });
+}
+
+async function removeSymbol(sym){
+  let updated = SYMBOLS.filter(s => s !== sym);
+  try{
+    const res = await fetch('/api/watchlist/remove', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({symbol: sym}),
+    });
+    const data = await res.json();
+    if(Array.isArray(data.symbols)) updated = data.symbols;
+  }catch(e){ /* server unreachable — still reflect the removal locally */ }
+  SYMBOLS = updated;
+  delete state.history[sym];
+  delete state.lastPrice[sym];
+  delete state.lastPct[sym];
+  buildCards();
+  refreshAll();
+  refreshSma();
+  refreshEarnings();
+  refreshPE();
+}
+
+async function addSymbol(sym){
+  sym = sym.toUpperCase();
+  if(SYMBOLS.includes(sym)) return;
+  let updated = [...SYMBOLS, sym];
+  try{
+    const res = await fetch('/api/watchlist/add', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({symbol: sym}),
+    });
+    const data = await res.json();
+    if(Array.isArray(data.symbols)) updated = data.symbols;
+  }catch(e){ /* server unreachable — still reflect the add locally */ }
+  SYMBOLS = updated;
+  buildCards();
+  refreshAll();
+  refreshSma();
+  refreshEarnings();
+  refreshPE();
+}
+
+// Picks up tickers anyone else added or removed — called on the normal
+// refresh cycle so a friend's change shows up within about a minute,
+// without needing a manual page reload.
+async function syncWatchlist(){
+  try{
+    const res = await fetch('/api/watchlist');
+    const data = await res.json();
+    if(!Array.isArray(data.symbols)) return;
+    const changed = data.symbols.length !== SYMBOLS.length ||
+      data.symbols.some((s, i) => s !== SYMBOLS[i]);
+    if(!changed) return;
+    const removed = SYMBOLS.filter(s => !data.symbols.includes(s));
+    removed.forEach(sym => {
+      delete state.history[sym];
+      delete state.lastPrice[sym];
+      delete state.lastPct[sym];
+    });
+    SYMBOLS = data.symbols;
+    buildCards();
+    refreshSma();
+    refreshEarnings();
+    refreshPE();
+  }catch(e){ /* non-fatal — just try again next cycle */ }
+}
+
+function renderSpark(sym){
+  const hist = state.history[sym] || [];
+  const svg = document.getElementById(`spark-${sym}`);
+  if(hist.length < 2){ svg.innerHTML = ''; return; }
+  const min = Math.min(...hist), max = Math.max(...hist);
+  const range = (max - min) || 1;
+  const w = 200, h = 28, pad = 2;
+  const pts = hist.map((v,i) => {
+    const x = (i/(hist.length-1)) * w;
+    const y = pad + (1 - (v-min)/range) * (h - pad*2);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const up = hist[hist.length-1] >= hist[0];
+  svg.innerHTML = `<polyline points="${pts}" fill="none" stroke="${up ? '#1fd67a' : '#ff4d63'}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>`;
+}
+
+async function refreshStocks(){
+  let data;
+  try{
+    const res = await fetch(`/api/quotes?symbols=${SYMBOLS.join(',')}`);
+    data = await res.json();
+  }catch(e){
+    SYMBOLS.forEach(sym => {
+      const card = document.getElementById(`card-${sym}`);
+      card.classList.add('err');
+      document.getElementById(`price-${sym}`).textContent = 'server unreachable';
+      document.getElementById(`chg-${sym}`).textContent = 'is app.py running?';
+    });
+    return;
+  }
+
+  SYMBOLS.forEach(sym => {
+    const card = document.getElementById(`card-${sym}`);
+    const q = data[sym];
+    if(!q || !q.ok){
+      card.classList.add('err');
+      document.getElementById(`price-${sym}`).textContent = 'unavailable';
+      document.getElementById(`chg-${sym}`).textContent = (q && q.error) || 'fetch failed';
+      return;
+    }
+    const up = q.d >= 0;
+    card.classList.remove('err');
+    card.classList.toggle('up', up);
+    card.classList.toggle('down', !up);
+    document.getElementById(`price-${sym}`).textContent = `$${q.c.toFixed(2)}`;
+    document.getElementById(`chg-${sym}`).innerHTML =
+      `<span class="chg ${up?'up':'down'}">${up?'+':''}${q.d.toFixed(2)} (${up?'+':''}${q.dp.toFixed(2)}%)</span>`;
+    document.getElementById(`pill-${sym}`).textContent = up ? '▲' : '▼';
+    if(!state.history[sym]) state.history[sym] = [];
+    state.history[sym].push(q.c);
+    if(state.history[sym].length > 60) state.history[sym].shift();
+    renderSpark(sym);
+    state.lastPrice[sym] = q.c;
+    state.lastPct[sym] = q.dp;
+    renderSma(sym);
+  });
+
+  reorderByPerformance();
+}
+
+// Highest daily % gainer first, biggest loser last. Uses the CSS Grid
+// `order` property rather than rebuilding the DOM, so card elements (and
+// everything tied to their ids — sparkline history, listeners) stay intact;
+// only their visual position changes.
+function reorderByPerformance(){
+  const ranked = [...SYMBOLS].sort((a, b) => {
+    const pa = state.lastPct[a], pb = state.lastPct[b];
+    if(pa == null && pb == null) return 0;
+    if(pa == null) return 1;   // symbols with no data sink to the bottom
+    if(pb == null) return -1;
+    return pb - pa;            // descending: highest gainer first
+  });
+  ranked.forEach((sym, i) => {
+    const card = document.getElementById(`card-${sym}`);
+    if(card) card.style.order = i;
+  });
+}
+
+// ---------- SMA (20/50 day) ----------
+async function refreshSma(){
+  try{
+    const res = await fetch(`/api/sma?symbols=${SYMBOLS.join(',')}`);
+    state.sma = await res.json();
+  }catch(e){
+    state.sma = null;
+  }
+  SYMBOLS.forEach(renderSma);
+}
+
+function renderSma(sym){
+  const el = document.getElementById(`sma-${sym}`);
+  const priceEl = document.getElementById(`price-${sym}`);
+  const s = state.sma && state.sma[sym];
+  if(!s || !s.ok){
+    el.textContent = 'SMA n/a';
+    el.title = (s && s.error) || 'no response from /api/sma';
+    if(priceEl) priceEl.classList.remove('signal-below','signal-mixed','signal-above','signal-extended');
+    return;
+  }
+  el.title = '';
+  const price = state.lastPrice[sym];
+  const parts = [];
+  // 'up'/'down' describe price position vs. that SMA — CSS inverts the
+  // actual colors (see the priceEl comment further below) for the
+  // entry-price philosophy: below = green (discount), above = red.
+  if(s.sma20 != null){
+    const cls = price != null ? (price >= s.sma20 ? 'up' : 'down') : '';
+    parts.push(`<span class="stat ${cls}">20d&nbsp;$${s.sma20.toFixed(2)}</span>`);
+  }
+  if(s.sma50 != null){
+    const cls = price != null ? (price >= s.sma50 ? 'up' : 'down') : '';
+    parts.push(`<span class="stat ${cls}">50d&nbsp;$${s.sma50.toFixed(2)}</span>`);
+  }
+  if(s.rsi14 != null){
+    let cls = '';
+    if(s.rsi14 >= 70) cls = 'rsi-hot';
+    else if(s.rsi14 >= 65) cls = 'rsi-warn-hot';
+    else if(s.rsi14 <= 30) cls = 'rsi-cold';
+    else if(s.rsi14 <= 35) cls = 'rsi-warn-cold';
+    parts.push(`<span class="stat ${cls}">RSI&nbsp;${s.rsi14.toFixed(1)}</span>`);
+  }
+  el.innerHTML = parts.join('') || 'SMA n/a';
+
+  // Four-tier entry-price read, all keyed off the same "is this a good
+  // price to buy in at" question (every symbol here is one Steve already
+  // wants to own — Steve sells puts on these ~25-35 DTE, so the 20d SMA
+  // is the relevant lookback, close to that expiry window):
+  //   - below both SMAs          -> green   (discount vs. recent average)
+  //   - between the two SMAs, OR
+  //     above both but < 15%
+  //     over the 20d SMA         -> blue    (still fine to sell puts on)
+  //   - above both, 15%+ over
+  //     the 20d SMA, but NOT
+  //     RSI-confirmed            -> yellow  (getting extended, caution)
+  //   - above both, >= 20% over
+  //     the 20d SMA AND RSI > 67 -> red     (extended AND overbought —
+  //                                          two confirming signals, not
+  //                                          just price extension alone)
+  // A heuristic, not a signal to act on.
+  if(priceEl && price != null && s.sma20 != null && s.sma50 != null){
+    priceEl.classList.remove('signal-below','signal-mixed','signal-above','signal-extended');
+    if(price < s.sma20 && price < s.sma50){
+      priceEl.classList.add('signal-below');
+    }else if(price >= s.sma20 && price >= s.sma50){
+      const pctOver20d = (price - s.sma20) / s.sma20 * 100;
+      const rsiConfirmsHot = s.rsi14 != null && s.rsi14 > 67;
+      const cls = (pctOver20d >= 20 && rsiConfirmsHot) ? 'signal-extended' : pctOver20d >= 15 ? 'signal-above' : 'signal-mixed';
+      priceEl.classList.add(cls);
+    }else{
+      priceEl.classList.add('signal-mixed');
+    }
+  }
+}
+
+// ---------- Fear & Greed ----------
+function scoreLabel(score){
+  if(score <= 20) return ['Extreme Fear', '#ff4d63'];
+  if(score <= 40) return ['Fear', '#f2854b'];
+  if(score <= 60) return ['Neutral', '#f2d24b'];
+  if(score <= 80) return ['Greed', '#a8d64b'];
+  return ['Extreme Greed', '#1fd67a'];
+}
+
+function isRegularMarketHoursClient(){
+  // US regular session only: 9:30am-4:00pm ET, Mon-Fri. Approximation —
+  // doesn't account for market holidays or early-close days.
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour12: false,
+    weekday: 'short', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(new Date());
+  const get = type => parts.find(p => p.type === type)?.value;
+  const weekday = get('weekday');
+  if(weekday === 'Sat' || weekday === 'Sun') return false;
+  const hour = parseInt(get('hour'), 10);
+  const minute = parseInt(get('minute'), 10);
+  const minutesSinceMidnight = hour * 60 + minute;
+  return minutesSinceMidnight >= (9 * 60 + 30) && minutesSinceMidnight < (16 * 60);
+}
+
+let _indexStripRenderedOnce = false;
+
+async function refreshFearGreed(){
+  try{
+    const res = await fetch('/api/fear-greed');
+    const d = await res.json();
+    const score = d.score.score;
+    const [label, color] = scoreLabel(score);
+    document.getElementById('fgScore').textContent = score;
+    const labelEl = document.getElementById('fgLabel');
+    labelEl.textContent = label;
+    labelEl.style.color = color;
+    const angle = -90 + (score/100)*180;
+    document.getElementById('needle').style.transform = `rotate(${angle}deg)`;
+
+    const compLines = d.score.components.map(c => `${c.name}: ${c.val}`).join('\n');
+    const fetchedLine = d.fetched_at ? `\nData fetched ${new Date(d.fetched_at * 1000).toLocaleString()}` : '';
+    document.getElementById('gaugeWrap').title = compLines + fetchedLine;
+
+    // The backend already enforces the "don't fetch fresh external data
+    // outside market hours" rule (it just re-serves its last cached value
+    // then). So we always re-render here from whatever's in
+    // _realIndexQuotes — numbers simply won't change until the backend
+    // actually updates them. Previously this was gated behind
+    // isRegularMarketHoursClient(), which meant that if the very first
+    // render ever landed on a transient fallback value (e.g. RapidAPI
+    // briefly failing over to the DIA ETF price instead of the real Dow
+    // index), the tile would freeze on that wrong value indefinitely.
+    renderIndexStrip();
+  }catch(e){
+    document.getElementById('fgLabel').textContent = 'unavailable';
+  }
+}
+
+// DOW and S&P 500 via their tracking ETFs (DIA/SPY) — these track their
+// indices extremely tightly, effectively no meaningful gap. NASDAQ uses a
+// separate fetch for ONEQ (Fidelity Nasdaq COMPOSITE Index Fund) instead
+// of QQQ, since QQQ only tracks the Nasdaq-100 (100 largest non-financial
+// companies) — a real, different index from what "the Nasdaq" usually means.
+// S&P 500 uses the same real-index-with-ETF-fallback approach.
+let _realIndexQuotes = { nasdaq: null, sp500: null, dow: null };
+
+async function refreshRealIndices(){
+  for(const key of ['nasdaq', 'sp500', 'dow', 'crude_oil', 'treasury_10y']){
+    try{
+      const res = await fetch(`/api/index/${key}`);
+      const data = await res.json();
+      _realIndexQuotes[key] = data.ok ? { ok: true, c: data.value, d: data.change, dp: data.percent_change, via: data.via, fetchedAt: data.fetched_at } : null;
+    }catch(e){
+      _realIndexQuotes[key] = null;
+    }
+  }
+}
+
+function renderIndexStrip(){
+  const strip = document.getElementById('indexStripCore');
+
+  function realIndexSpan(label, key, fallbackName, formatter){
+    const q = _realIndexQuotes[key];
+    if(!q || !q.ok){
+      return `<span class="idx"><span class="name">${label}</span> <span class="val">&mdash;</span></span>`;
+    }
+    const up = q.d >= 0;
+    const isReal = q.via === 'real index';
+    const valStr = formatter ? formatter(q.c) : q.c.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+    // Actual server-side fetch time for THIS index, not page-render
+    // time — each index updates on its own cadence, so this can
+    // legitimately differ between DOW/NASDAQ/S&P/etc even though the
+    // page itself refreshes every minute.
+    const fetchedAt = q.fetchedAt ? `data fetched ${new Date(q.fetchedAt * 1000).toLocaleString()}` : 'fetch time unknown';
+    const tip = isReal ? `${fetchedAt} \u2014 real ${label}` : `${fetchedAt} \u2014 via ${q.via || fallbackName}`;
+    const chgStr = q.dp != null ? `<span class="chg ${up?'up':'down'}">${up?'+':''}${q.dp.toFixed(2)}%</span>` : '';
+    return `<span class="idx" title="${tip}">
+      <span class="name">${label}</span>
+      <span class="val">${valStr}</span>
+      ${chgStr}
+    </span>`;
+  }
+
+  strip.innerHTML =
+    realIndexSpan('DOW', 'dow', 'DIA') +
+    realIndexSpan('NASDAQ', 'nasdaq', 'ONEQ') +
+    realIndexSpan('S&P 500', 'sp500', 'SPY') +
+    realIndexSpan('CRUDE OIL', 'crude_oil', 'FRED', v => `$${v.toFixed(2)}`) +
+    `<a href="https://hormuzstraitmonitor.com/" target="_blank" rel="noopener noreferrer" class="idx hormuz-link" title="Strait of Hormuz shipping traffic \u2014 ~20% of world oil transits here, a real-time bottleneck indicator">
+      <span class="name">\u{1F6A2} HORMUZ</span>
+      <span class="val">traffic \u2192</span>
+    </a>` +
+    realIndexSpan('10Y TREASURY', 'treasury_10y', 'FRED', v => `${v.toFixed(2)}%`);
+}
+
+async function refreshGold(){
+  try{
+    const res = await fetch('/api/gold');
+    const data = await res.json();
+    renderMacroValue('goldVal', data.gold, v => `$${v.toFixed(2)}`);
+    renderMacroValue('silverVal', data.silver, v => `$${v.toFixed(2)}`);
+    renderMacroValue('bitcoinVal', data.bitcoin, v => `$${v.toLocaleString(undefined, {maximumFractionDigits:0})}`);
+  }catch(e){
+    document.getElementById('goldVal').textContent = '\u2014';
+    document.getElementById('silverVal').textContent = '\u2014';
+    document.getElementById('bitcoinVal').textContent = '\u2014';
+  }
+}
+
+function renderMacroValue(elId, entry, formatter){
+  const el = document.getElementById(elId);
+  if(!entry || !entry.ok || entry.value == null){
+    el.textContent = '\u2014';
+    el.title = (entry && entry.error) || '';
+    return;
+  }
+  if(entry.as_of){
+    el.title = `as of ${entry.as_of}`;
+  }else if(entry.updated_at){
+    try{
+      el.title = `as of ${new Date(entry.updated_at).toLocaleString()}`;
+    }catch(e){
+      el.title = `as of ${entry.updated_at}`;
+    }
+  }else{
+    el.title = '';
+  }
+  if(entry.percent_change == null){
+    el.textContent = formatter(entry.value);
+    return;
+  }
+  const up = entry.percent_change >= 0;
+  el.innerHTML = `${formatter(entry.value)} <span class="chg ${up?'up':'down'}">${up?'+':''}${entry.percent_change.toFixed(2)}%</span>`;
+}
+
+// ---------- orchestration ----------
+async function refreshAll(){
+  updatedEl.textContent = 'refreshing…';
+  await refreshRealIndices();
+  await Promise.all([refreshStocks(), refreshFearGreed()]);
+  updatedEl.textContent = `updated ${new Date().toLocaleTimeString()}`;
+  state.secondsLeft = REFRESH_MS/1000;
+}
+
+// ---------- Upcoming earnings ----------
+function symLink(sym){
+  return `<a href="https://finance.yahoo.com/quote/${encodeURIComponent(sym)}" target="_blank" rel="noopener noreferrer" class="sym-link">${sym}</a>`;
+}
+
+const _isAndroid = /Android/i.test(navigator.userAgent);
+
+function tradeLink(sym){
+  // Small separate icon next to the symbol — goes to E*TRADE for one-click
+  // access from Steve's own brokerage. Kept apart from symLink() so the
+  // main symbol text still points to Yahoo (works for anyone viewing,
+  // including Steve's friend, who may not have an E*TRADE account).
+  const symEnc = encodeURIComponent(sym);
+  const path = `us.etrade.com/etx/mkt/quotes?symbol=${symEnc}`;
+  const httpsUrl = `https://${path}`;
+
+  if (_isAndroid) {
+    // Android "Intent URI" — tells the OS to hand this off directly to
+    // E*TRADE's official app (package com.etrade.mobilepro.activity) if
+    // it's installed, and to fall back to the normal browser link
+    // otherwise. Whether it lands exactly on the symbol's quote screen
+    // inside the app (vs. just opening the app generally) depends on
+    // E*TRADE's own in-app deep-link handling, which isn't publicly
+    // documented — but it should open the app either way.
+    const fallback = encodeURIComponent(httpsUrl);
+    const intentUrl = `intent://${path}#Intent;scheme=https;package=com.etrade.mobilepro.activity;S.browser_fallback_url=${fallback};end`;
+    return `<a href="${intentUrl}" class="trade-link" title="Trade ${sym} on E*TRADE">&#8599;</a>`;
+  }
+
+  return `<a href="${httpsUrl}" target="_blank" rel="noopener noreferrer" class="trade-link" title="Trade ${sym} on E*TRADE">&#8599;</a>`;
+}
+
+function fmtRevenue(v){
+  if(v == null) return null;
+  const abs = Math.abs(v);
+  if(abs >= 1e9) return '$'+(v/1e9).toFixed(1)+'B';
+  if(abs >= 1e6) return '$'+(v/1e6).toFixed(1)+'M';
+  return '$'+Number(v).toLocaleString();
+}
+
+function daysAwayLabel(date, today){
+  const days = Math.round((date - today) / 86400000);
+  if(days === 0) return 'today';
+  if(days === 1) return 'tomorrow';
+  if(days < 0) return `${-days}d ago`;
+  return `in ${days}d`;
+}
+
+async function refreshFedCalendar(){
+  const el = document.getElementById('fedCalendarList');
+  try{
+    const res = await fetch('/api/fed-calendar');
+    const data = await res.json();
+    const today = new Date(); today.setHours(0,0,0,0);
+
+    // Fetched separately and tolerated independently — if Kalshi's API
+    // has a hiccup, the rest of the Fed Calendar panel (CPI/PPI/jobs/
+    // next meeting date) should still render fine without it.
+    let fedProbData = null;
+    try{
+      const probRes = await fetch('/api/fed-probabilities');
+      fedProbData = await probRes.json();
+    }catch(e){ /* non-fatal — Market Odds line just won't show */ }
+
+    const html = [];
+
+    function formatLastValue(info){
+      const sign = info.value >= 0 ? '+' : '';
+      if(info.unit === '%') return `${sign}${info.value}%`;
+      return `${sign}${info.value}K jobs`;
+    }
+
+    function combinedRow(label, lastInfo, nextDateVal, colorMode){
+      const hasLast = lastInfo && lastInfo.ok && lastInfo.value != null;
+      const hasNext = !!nextDateVal;
+      if(!hasLast && !hasNext) return '';
+
+      let nextText = '';
+      if(hasNext){
+        const d = new Date(nextDateVal + 'T00:00:00');
+        nextText = `Next ${d.toLocaleDateString(undefined,{month:'short',day:'numeric'})} \u00b7 ${daysAwayLabel(d, today)}`;
+      }
+
+      let chip = '';
+      if(hasLast){
+        const dateStr = lastInfo.date ? new Date(lastInfo.date+'T00:00:00').toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '';
+        let cls = '';
+        if(colorMode === 'sign'){
+          // Jobs — more added is unambiguously favorable, no benchmark needed.
+          cls = lastInfo.value > 0 ? 'up' : (lastInfo.value < 0 ? 'down' : '');
+        }else if(colorMode === 'sign-inverted'){
+          // CPI/PPI — the value IS already the month-over-month change, so
+          // color it directly: positive means prices rose (unfavorable,
+          // red), negative means they fell (favorable, green). Opposite
+          // sign convention from jobs, where positive is favorable.
+          cls = lastInfo.value < 0 ? 'up' : (lastInfo.value > 0 ? 'down' : '');
+        }
+        chip = `<span class="stat ${cls}">${formatLastValue(lastInfo)} (${dateStr})</span>`;
+      }
+
+      return `<div class="earn-row">
+        <div class="movers-row" style="border-bottom:none;padding-bottom:2px;">
+          <span><span class="sym">${label}</span></span>
+          <span class="pct">${nextText}</span>
+        </div>
+        <div class="earn-stats">${chip}</div>
+      </div>`;
+    }
+
+    // CPI/PPI colored by trend (accelerating vs decelerating) — no
+    // analyst estimate to compare against anymore.
+    // CPI/PPI colored by the sign of the month-over-month change itself —
+    // positive (prices rose) is unfavorable/red, negative is favorable/green.
+    html.push(combinedRow('Core CPI', data.cpi_last, data.cpi && data.cpi.ok ? data.cpi.next_date : null, 'sign-inverted'));
+    html.push(combinedRow('Core PPI', data.ppi_last, data.ppi && data.ppi.ok ? data.ppi.next_date : null, 'sign-inverted'));
+    // Jobs colored by sign — more jobs added is unambiguously favorable.
+    html.push(combinedRow('Jobs Report', data.jobs_last, data.jobs && data.jobs.ok ? data.jobs.next_date : null, 'sign'));
+
+    if(data.fomc && data.fomc.ok && data.fomc.start){
+      const dStart = new Date(data.fomc.start + 'T00:00:00');
+      const dEnd = data.fomc.end ? new Date(data.fomc.end + 'T00:00:00') : dStart;
+      const startStr = dStart.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+      const endStr = dEnd.toLocaleDateString(undefined,{day:'numeric'});
+      html.push(`<div class="movers-row">
+        <span><span class="sym">Next FOMC</span><span class="name">${startStr}\u2013${endStr}</span></span>
+        <span class="pct">${daysAwayLabel(dStart, today)}</span>
+      </div>`);
+    }
+
+    // Market-implied odds for the nearest upcoming meeting, from Kalshi's
+    // KXFED prediction market (real-money, CFTC-regulated) — a free
+    // substitute for CME FedWatch, which requires a paid enterprise API.
+    if(fedProbData && fedProbData.ok && fedProbData.meetings && fedProbData.meetings.length){
+      const todayIso = today.toISOString().slice(0,10);
+      const upcoming = fedProbData.meetings.filter(m => m.date >= todayIso);
+      const nextMeeting = upcoming[0] || fedProbData.meetings[0];
+      if(nextMeeting && nextMeeting.outcomes && nextMeeting.outcomes.length){
+        const topOutcomes = nextMeeting.outcomes.slice(0,2)
+          .map(o => `${o.range} ${o.probability.toFixed(0)}%`)
+          .join(' \u00b7 ');
+
+        // Current rate prefix, e.g. "Current 3.50-3.75% \u2192 ".
+        const cr = fedProbData.current_rate;
+        const currentRateStr = cr && cr.lower != null && cr.upper != null
+          ? `Current ${cr.lower.toFixed(2)}\u2013${cr.upper.toFixed(2)}% \u2192 ` : '';
+
+        // Color compares the SINGLE most-likely hike scenario and the
+        // single most-likely cut scenario against hold — i.e. exactly
+        // the numbers visible in topOutcomes above, not a sum across
+        // every tail bucket (including ones never shown on screen).
+        // A near-tie like "hold 49% / hike 49%" should read as neutral,
+        // since that's what the displayed numbers actually say.
+        // 5-point neutral band: an assumption, not something Steve
+        // specified — easy to tune if it doesn't feel right in practice.
+        let oddsClass = '';
+        if(nextMeeting.outcomes.some(o => o.direction)){ // classification only present once current_rate is known
+          const holdProb = (nextMeeting.outcomes.find(o => o.direction === 'hold') || {}).probability || 0;
+          const hikeOutcomes = nextMeeting.outcomes.filter(o => o.direction === 'hike');
+          const cutOutcomes = nextMeeting.outcomes.filter(o => o.direction === 'cut');
+          const topHikeProb = hikeOutcomes.length ? Math.max(...hikeOutcomes.map(o => o.probability)) : 0;
+          const topCutProb = cutOutcomes.length ? Math.max(...cutOutcomes.map(o => o.probability)) : 0;
+          if(topHikeProb - holdProb > 5) oddsClass = 'odds-hike';
+          else if(topCutProb - holdProb > 5) oddsClass = 'odds-cut';
+          else oddsClass = 'odds-neutral';
+        }
+
+        // Hover tooltip: the next couple of meetings after this one, same
+        // "top 2 outcomes" format. Kalshi's contracts are all priced
+        // against TODAY's rate (not "what will that specific meeting do
+        // in isolation") — cumulative, same as CME FedWatch's aggregated
+        // view — so later meetings naturally show wider/different odds
+        // as they bake in more time for the rate to have moved.
+        const laterMeetings = upcoming.slice(1, 3);
+        let tooltip = 'Odds are cumulative vs. today\'s rate (like CME FedWatch\'s aggregated view), not this meeting in isolation.';
+        if(laterMeetings.length){
+          const laterLines = laterMeetings.map(m => {
+            const label = new Date(m.date + 'T00:00:00').toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
+            const outcomesStr = m.outcomes.slice(0,2).map(o => `${o.range} ${o.probability.toFixed(0)}%`).join(' \u00b7 ');
+            return `${label}: ${outcomesStr}`;
+          });
+          tooltip += '\n\n' + laterLines.join('\n');
+        }
+
+        html.push(`<div class="earn-row">
+          <div class="movers-row" style="border-bottom:none;padding-bottom:2px;">
+            <span><span class="sym" style="font-size:12px;">Fed Rate Odds</span></span>
+          </div>
+          <div class="earn-stats"><span class="fed-odds-text ${oddsClass}" title="${tooltip.replace(/"/g,'&quot;')}">${currentRateStr}${topOutcomes}</span></div>
+        </div>`);
+      }
+    }
+
+    const content = html.filter(Boolean).join('');
+    el.innerHTML = content || `<div class="movers-empty">${(data.cpi && data.cpi.error) || 'unavailable'}</div>`;
+  }catch(e){
+    el.innerHTML = `<div class="movers-empty">unavailable</div>`;
+  }
+}
+
+async function refreshEarnings(){
+  const el = document.getElementById('earningsList');
+  try{
+    const res = await fetch(`/api/earnings?symbols=${SYMBOLS.join(',')}`);
+    const data = await res.json();
+    const today = new Date(); today.setHours(0,0,0,0);
+    const cutoff = new Date(today); cutoff.setDate(cutoff.getDate() + 60);
+    const lookback = new Date(today); lookback.setDate(lookback.getDate() - 14);
+
+    const entries = SYMBOLS
+      .map(sym => ({ sym, info: data[sym] }))
+      .filter(({info}) => info && info.ok && info.kind && info.date)
+      .map(({sym, info}) => ({ sym, info, date: new Date(info.date + 'T00:00:00') }))
+      .filter(({date}) => date >= lookback && date <= cutoff)
+      .sort((a, b) => a.date - b.date);  // chronological — oldest (most past) first, future dates last
+
+    if(!entries.length){
+      el.innerHTML = `<div class="movers-empty">No recent or upcoming earnings in your watchlist</div>`;
+      return;
+    }
+
+    const hourLabel = { bmo: 'before open', amc: 'after close', dmh: 'during hours' };
+    el.innerHTML = entries.map(({sym, info, date}) => {
+      const dateStr = date.toLocaleDateString(undefined, {month:'short', day:'numeric'});
+
+      if(info.kind === 'recent'){
+        const epsDiff = (info.eps_actual!=null && info.eps_estimate!=null) ? info.eps_actual - info.eps_estimate : null;
+        const epsCls = epsDiff == null ? '' : (epsDiff > 0 ? 'up' : (epsDiff < 0 ? 'down' : ''));
+        const epsChip = info.eps_actual!=null
+          ? `<span class="stat ${epsCls}">EPS $${info.eps_actual.toFixed(2)}${info.eps_estimate!=null ? ' vs $'+info.eps_estimate.toFixed(2)+' est' : ''}</span>`
+          : '';
+
+        const revDiff = (info.revenue_actual!=null && info.revenue_estimate!=null) ? info.revenue_actual - info.revenue_estimate : null;
+        const revCls = revDiff == null ? '' : (revDiff > 0 ? 'up' : (revDiff < 0 ? 'down' : ''));
+        const revChip = info.revenue_actual!=null
+          ? `<span class="stat ${revCls}">Rev ${fmtRevenue(info.revenue_actual)}${info.revenue_estimate!=null ? ' vs '+fmtRevenue(info.revenue_estimate)+' est' : ''}</span>`
+          : '';
+
+        return `<div class="earn-row">
+          <div class="movers-row" style="border-bottom:none;padding-bottom:2px;">
+            <span><span class="sym">${symLink(sym)}${tradeLink(sym)}</span><span class="name">Reported ${dateStr}</span></span>
+          </div>
+          <div class="earn-stats">${epsChip}${revChip}</div>
+        </div>`;
+      }
+
+      const daysAway = Math.round((date - today) / 86400000);
+      const when = daysAway === 0 ? 'today' : daysAway === 1 ? 'tomorrow' : `in ${daysAway}d`;
+      return `<div class="movers-row">
+        <span><span class="sym">${symLink(sym)}${tradeLink(sym)}</span><span class="name">${dateStr}${info.hour && hourLabel[info.hour] ? ' · '+hourLabel[info.hour] : ''}</span></span>
+        <span class="pct">${when}</span>
+      </div>`;
+    }).join('');
+  }catch(e){
+    el.innerHTML = `<div class="movers-empty">unavailable</div>`;
+  }
+}
+
+async function refreshPE(){
+  try{
+    const res = await fetch(`/api/pe?symbols=${SYMBOLS.join(',')}`);
+    const data = await res.json();
+    SYMBOLS.forEach(sym => {
+      const el = document.getElementById(`pe-${sym}`);
+      if(!el) return;
+      const info = data[sym];
+      if(!(info && info.ok && info.pe != null)){
+        el.textContent = '';
+        el.className = 'pe-ratio';
+        el.title = '';
+        return;
+      }
+      const pe = info.pe;
+      const chg = info.week_change_pct;
+      el.textContent = `(PE ${pe.toFixed(1)})`;
+      if(chg == null){
+        // Not enough history yet to know the week-over-week trend
+        // (e.g. this feature hasn't been tracking this symbol for a
+        // full week yet) — show the number plain rather than color it.
+        el.className = 'pe-ratio';
+        el.title = 'Week-over-week change not available yet';
+        return;
+      }
+      const tier = chg <= -10 ? 'pe-low' : chg <= 10 ? 'pe-healthy' : chg <= 25 ? 'pe-high' : 'pe-extreme';
+      el.className = `pe-ratio ${tier}`;
+      el.title = `${chg >= 0 ? '+' : ''}${chg.toFixed(1)}% vs 1 week ago`;
+    });
+  }catch(e){ /* non-fatal — PE labels just stay blank */ }
+}
+
+document.getElementById('refreshBtn').addEventListener('click', refreshAll);
+
+function tickCountdown(){
+  state.secondsLeft = Math.max(0, state.secondsLeft - 1);
+  const m = Math.floor(state.secondsLeft/60), s = state.secondsLeft%60;
+  countdownEl.textContent = `next in ${m}:${s.toString().padStart(2,'0')}`;
+}
+
+const SMA_REFRESH_MS = 60 * 60 * 1000; // matches backend's slower daily-data cache
+
+// ---------- add / search ----------
+const addInput = document.getElementById('addInput');
+const suggestionsEl = document.getElementById('suggestions');
+let searchDebounce = null;
+let activeIndex = -1;
+let currentResults = [];
+
+async function runSearch(q){
+  if(!q){ closeSuggestions(); return; }
+  try{
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    currentResults = await res.json();
+  }catch(e){
+    currentResults = [];
+  }
+  renderSuggestions();
+}
+
+function renderSuggestions(){
+  activeIndex = -1;
+  if(!currentResults.length){
+    suggestionsEl.innerHTML = `<div class="empty">No matches</div>`;
+    suggestionsEl.classList.add('open');
+    return;
+  }
+  suggestionsEl.innerHTML = currentResults.map((r, i) => `
+    <div class="opt" data-index="${i}" data-sym="${r.symbol}">
+      <span class="sym">${r.symbol}</span>
+      <span class="desc">${r.description || ''}</span>
+    </div>
+  `).join('');
+  suggestionsEl.classList.add('open');
+  suggestionsEl.querySelectorAll('.opt').forEach(opt => {
+    opt.addEventListener('click', () => pickSuggestion(opt.dataset.sym));
+  });
+}
+
+function closeSuggestions(){
+  suggestionsEl.classList.remove('open');
+  suggestionsEl.innerHTML = '';
+  currentResults = [];
+  activeIndex = -1;
+}
+
+function pickSuggestion(sym){
+  addSymbol(sym);
+  addInput.value = '';
+  closeSuggestions();
+}
+
+addInput.addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  const q = addInput.value.trim();
+  searchDebounce = setTimeout(() => runSearch(q), 250);
+});
+
+addInput.addEventListener('keydown', (e) => {
+  const opts = suggestionsEl.querySelectorAll('.opt');
+  if(e.key === 'ArrowDown'){
+    e.preventDefault();
+    if(opts.length){ activeIndex = (activeIndex + 1) % opts.length; updateActive(opts); }
+  }else if(e.key === 'ArrowUp'){
+    e.preventDefault();
+    if(opts.length){ activeIndex = (activeIndex - 1 + opts.length) % opts.length; updateActive(opts); }
+  }else if(e.key === 'Enter'){
+    e.preventDefault();
+    if(activeIndex >= 0 && currentResults[activeIndex]){
+      pickSuggestion(currentResults[activeIndex].symbol);
+    }else if(addInput.value.trim()){
+      // No suggestion picked — treat the typed text itself as a ticker.
+      pickSuggestion(addInput.value.trim());
+    }
+  }else if(e.key === 'Escape'){
+    closeSuggestions();
+  }
+});
+
+function updateActive(opts){
+  opts.forEach((o, i) => o.classList.toggle('active', i === activeIndex));
+}
+
+document.addEventListener('click', (e) => {
+  if(!e.target.closest('.add-box')) closeSuggestions();
+});
+
+if('serviceWorker' in navigator){
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/service-worker.js').catch(() => {
+      // Non-fatal — the site still works as a normal page if this fails,
+      // it just won't be installable as a standalone app.
+    });
+  });
+}
+
+(async function init(){
+  SYMBOLS = await loadSharedWatchlist();
+  buildCards();
+  refreshAll();
+  refreshSma();
+  refreshEarnings();
+  refreshPE();
+  refreshGold();
+  refreshFedCalendar();
+  setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
+  setInterval(refreshSma, SMA_REFRESH_MS);
+  setInterval(refreshEarnings, 60 * 60 * 1000);
+  setInterval(refreshPE, 60 * 60 * 1000);
+  setInterval(refreshGold, 60 * 60 * 1000);
+  setInterval(refreshFedCalendar, 60 * 60 * 1000);
+  setInterval(tickCountdown, 1000);
+})();
+</script>
+</body>
+</html>
