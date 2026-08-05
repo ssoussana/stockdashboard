@@ -522,10 +522,13 @@ function renderSma(sym){
   //   - between the two SMAs, OR
   //     above both but < 15%
   //     over the 20d SMA         -> blue    (still fine to sell puts on)
-  //   - above both, 15% to <20%
-  //     over the 20d SMA         -> yellow  (getting extended, caution)
-  //   - above both, >= 20%
-  //     over the 20d SMA         -> red     (significantly extended)
+  //   - above both, 15%+ over
+  //     the 20d SMA, but NOT
+  //     RSI-confirmed            -> yellow  (getting extended, caution)
+  //   - above both, >= 20% over
+  //     the 20d SMA AND RSI > 67 -> red     (extended AND overbought —
+  //                                          two confirming signals, not
+  //                                          just price extension alone)
   // A heuristic, not a signal to act on.
   if(priceEl && price != null && s.sma20 != null && s.sma50 != null){
     priceEl.classList.remove('signal-below','signal-mixed','signal-above','signal-extended');
@@ -533,7 +536,8 @@ function renderSma(sym){
       priceEl.classList.add('signal-below');
     }else if(price >= s.sma20 && price >= s.sma50){
       const pctOver20d = (price - s.sma20) / s.sma20 * 100;
-      const cls = pctOver20d >= 20 ? 'signal-extended' : pctOver20d >= 15 ? 'signal-above' : 'signal-mixed';
+      const rsiConfirmsHot = s.rsi14 != null && s.rsi14 > 67;
+      const cls = (pctOver20d >= 20 && rsiConfirmsHot) ? 'signal-extended' : pctOver20d >= 15 ? 'signal-above' : 'signal-mixed';
       priceEl.classList.add(cls);
     }else{
       priceEl.classList.add('signal-mixed');
