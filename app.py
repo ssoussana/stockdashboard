@@ -293,13 +293,20 @@ def fetch_quote_one(sym, _retry=True):
             raise ValueError("no data")
         return {"ok": True, **data}
     except requests.exceptions.HTTPError:
-        # Report only the status code — never the underlying exception,
-        # which embeds the full request URL including the API key.
+        # Status code + a snippet of Finnhub's own response body — their
+        # error responses are typically just {"error": "..."} and don't
+        # echo back the request/API key, so this is safe to surface.
+        # Persistent identical failures across many minutes (not
+        # rotating between symbols) survived both a retry-with-backoff
+        # AND a shared cross-feature rate limiter, which rules out
+        # simple burst/pacing issues — this body text is what actually
+        # tells us whether it's a real account-level cap.
         status = r.status_code
+        body_snippet = r.text[:200]
         if _retry and status in (429, 500, 502, 503, 504):
             time.sleep(2)
             return fetch_quote_one(sym, _retry=False)
-        return {"ok": False, "error": f"HTTP {status}"}
+        return {"ok": False, "error": f"HTTP {status}: {body_snippet}"}
     except Exception:
         if _retry:
             time.sleep(2)
@@ -388,7 +395,22 @@ def quotes():
             # a growing watchlist, sequential fetching was slow enough to trip
             # the host's request timeout and crash the worker mid-request,
             # wiping other in-memory data (including SMA/RSI) along with it.
-            results = list(_quote_executor.map(fetch_quote_one, to_fetch))
+            #
+            # Dispatch is staggered rather than firing all workers at the
+            # same instant — a single isolated Finnhub request succeeds
+            # reliably (confirmed via /api/debug/finnhub-quote-test) while
+            # the same symbols fail specifically as part of this batch,
+            # which survived both a retry-with-backoff and a 55/min global
+            # rate limiter. That points to Finnhub enforcing a stricter
+            # per-second/concurrent-connection limit separate from its
+            # per-minute one — 4 truly simultaneous requests can trip that
+            # even when the per-minute average looks completely reasonable.
+            futures = []
+            for i, sym in enumerate(to_fetch):
+                if i > 0:
+                    time.sleep(0.3)
+                futures.append(_quote_executor.submit(fetch_quote_one, sym))
+            results = [f.result() for f in futures]
             now = time.time()
             for sym, data in zip(to_fetch, results):
                 _quote_cache[sym] = {"data": data, "ts": now}
