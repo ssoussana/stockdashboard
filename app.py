@@ -247,7 +247,40 @@ def pwa_icon_512_maskable():
     return send_from_directory(".", "icon-512-maskable.png", mimetype="image/png")
 
 
+# One shared limiter for every Finnhub call, across all call sites
+# (watchlist quotes, symbol search, earnings, P/E, ETF fallbacks for
+# indices). These used to fire completely independently, each with its
+# own worker pool and no coordination — individually none looked
+# excessive, but combined (especially with a 21-symbol watchlist now
+# hit by three separate executors around the same refresh cycle) they
+# could burst past Finnhub's real free-tier limit (60/min), which
+# likely explains widespread "HTTP 503"/"fetch failed" errors across
+# many symbols at once rather than isolated blips. Same sliding-window
+# approach as acquire_twelvedata_credits, just for a different provider.
+_finnhub_credit_lock = threading.Lock()
+_finnhub_credit_timestamps = collections.deque()
+FINNHUB_RATE_LIMIT = 55  # free tier is 60/min; small safety margin
+
+
+def acquire_finnhub_credit():
+    waited = 0
+    while True:
+        with _finnhub_credit_lock:
+            now = time.time()
+            while _finnhub_credit_timestamps and now - _finnhub_credit_timestamps[0] > 60:
+                _finnhub_credit_timestamps.popleft()
+            if len(_finnhub_credit_timestamps) < FINNHUB_RATE_LIMIT:
+                _finnhub_credit_timestamps.append(now)
+                return
+            in_use = len(_finnhub_credit_timestamps)
+        if waited and waited % 10 == 0:
+            print(f"[finnhub] still waiting for a credit after {waited}s ({in_use}/{FINNHUB_RATE_LIMIT} in use)", flush=True)
+        time.sleep(1)
+        waited += 1
+
+
 def fetch_quote_one(sym, _retry=True):
+    acquire_finnhub_credit()
     try:
         r = _http.get(
             "https://finnhub.io/api/v1/quote",
@@ -383,6 +416,7 @@ def search():
     if not q:
         return jsonify([])
     try:
+        acquire_finnhub_credit()
         r = _http.get(
             "https://finnhub.io/api/v1/search",
             params={"q": q, "token": API_KEY},
@@ -788,6 +822,7 @@ def fetch_earnings_one(sym, _retry=True):
     for a full day."""
     today = datetime.now().date()
     try:
+        acquire_finnhub_credit()
         r = _http.get(
             "https://finnhub.io/api/v1/calendar/earnings",
             params={
@@ -971,6 +1006,7 @@ def fetch_pe_one(sym, _retry=True):
     fetch_earnings_one — this host has shown bursts can transiently
     fail together."""
     try:
+        acquire_finnhub_credit()
         r = _http.get(
             "https://finnhub.io/api/v1/stock/metric",
             params={"symbol": sym, "metric": "all", "token": API_KEY},
@@ -1703,6 +1739,7 @@ def test_alt_vix_vxn_debug():
 
     for sym in ["^VIX", "^VXN", "VIX", "VXN"]:
         try:
+            acquire_finnhub_credit()
             r = _http.get(
                 "https://finnhub.io/api/v1/quote",
                 params={"symbol": sym, "token": API_KEY},
@@ -1771,6 +1808,7 @@ def finnhub_quote_test_debug():
     symbol = request.args.get("symbol", "")
     if not symbol:
         return jsonify({"error": "pass a ?symbol=... to test, e.g. ?symbol=.IXIC"})
+    acquire_finnhub_credit()
     r = _http.get(
         "https://finnhub.io/api/v1/quote",
         params={"symbol": symbol, "token": API_KEY},
@@ -1953,6 +1991,7 @@ def etf_fallback(etf_symbol):
     """Fallback factory — a tracking ETF via Finnhub, same source already
     used elsewhere in the app. Returns a no-arg callable."""
     def fallback():
+        acquire_finnhub_credit()
         r = _http.get(
             "https://finnhub.io/api/v1/quote",
             params={"symbol": etf_symbol, "token": API_KEY},
