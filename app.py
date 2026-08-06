@@ -2051,20 +2051,58 @@ def macro_fallback(macro_key):
     return fallback
 
 
+def fetch_yahoo_chart_quote(symbol):
+    """Yahoo Finance's unofficial, unauthenticated chart endpoint —
+    confirmed working from Render's IP (2026-08-06) with real data for
+    both ^VIX and ^VXN, unlike Stooq which blocks cloud-hosting IPs
+    outright. Same underlying endpoint the yfinance Python library
+    wraps, called directly here to avoid pulling in yfinance's heavy
+    pandas/numpy dependencies for what's just a single current price."""
+    r = _http.get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+        params={"interval": "1d", "range": "1d"},
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+        timeout=(5, 15),
+    )
+    if r.text.lstrip().startswith("<"):
+        raise ValueError(f"got HTML instead of JSON (likely blocked) — first 150 chars: {r.text[:150]!r}")
+    r.raise_for_status()
+    data = r.json()
+    try:
+        meta = data["chart"]["result"][0]["meta"]
+        price = meta["regularMarketPrice"]
+        prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+    except (KeyError, IndexError, TypeError) as e:
+        raise ValueError(f"unexpected response shape: {e!r} — raw: {str(data)[:200]}")
+    if price is None:
+        raise ValueError(f"no regularMarketPrice in response: {str(meta)[:200]}")
+    change = (price - prev_close) if prev_close else None
+    percent_change = (change / prev_close * 100) if (change is not None and prev_close) else None
+    return {
+        "ok": True,
+        "value": round(float(price), 2),
+        "change": round(float(change), 2) if change is not None else None,
+        "percent_change": round(float(percent_change), 2) if percent_change is not None else None,
+    }
+
+
 REAL_INDEX_SOURCES = {
     "dow": (lambda: fetch_fmp_index_quote("^DJI"), etf_fallback("DIA")),
     "nasdaq": (lambda: fetch_fmp_index_quote("^IXIC"), etf_fallback("ONEQ")),
     "sp500": (lambda: fetch_fmp_index_quote("^GSPC"), etf_fallback("SPY")),
     "crude_oil": (lambda: fetch_yahoo127_key_statistics("CL=F"), macro_fallback("crude_oil")),
     "treasury_10y": (lambda: fetch_via_live_stock_market("^TNX"), macro_fallback("treasury_10y")),
-    "vix": (lambda: fetch_fmp_index_quote("^VIX"), etf_fallback("VIXY")),
-    "vxn": (lambda: fetch_fmp_index_quote("^VXN"), no_fallback("no reliable ETF proxy for VXN (Nasdaq-100 volatility)")),
+    "vix": (lambda: fetch_fmp_index_quote("^VIX"), lambda: fetch_yahoo_chart_quote("^VIX")),
+    "vxn": (lambda: fetch_yahoo_chart_quote("^VXN"), no_fallback("Yahoo chart is already the primary source for VXN — FMP 402s on this symbol")),
 }
 # Per-index cadence, sized to each quota:
-# - Dow, Nasdaq, S&P 500, VIX, and VXN all share FMP's single 250/day
-#   free quota (nothing else in the app uses FMP). 15min each, market
-#   hours only (~7hrs/day): 7*60/15=28 calls/day per index * 5 = 140/day
+# - Dow, Nasdaq, S&P 500, and VIX share FMP's single 250/day free quota
+#   (nothing else in the app uses FMP). 15min each, market hours only
+#   (~7hrs/day): 7*60/15=28 calls/day per index * 4 = 112/day
 #   combined — comfortable margin under 250/day.
+# - VXN doesn't touch FMP at all — it's primary source is Yahoo's
+#   unofficial chart endpoint (FMP 402s on this symbol), no quota to
+#   track since that endpoint is unauthenticated/undocumented.
 # - Treasury now has the "live-stock-market" RapidAPI quota to itself
 #   (previously shared 3 ways with Dow/Nasdaq) — 25min ~= 364/mo, safely
 #   under its 500/mo cap with real margin to spare.
