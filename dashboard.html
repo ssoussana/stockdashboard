@@ -985,20 +985,42 @@ async function refreshEarnings(){
     const cutoff = new Date(today); cutoff.setDate(cutoff.getDate() + 60);
     const lookback = new Date(today); lookback.setDate(lookback.getDate() - 14);
 
+    function addTradingDays(date, n){
+      const d = new Date(date);
+      let added = 0;
+      while(added < n){
+        d.setDate(d.getDate() + 1);
+        const day = d.getDay();
+        if(day !== 0 && day !== 6) added++;  // skip Sat/Sun
+      }
+      return d;
+    }
+    const soonCutoff = addTradingDays(today, 2);
+
     const entries = SYMBOLS
       .map(sym => ({ sym, info: data[sym] }))
       .filter(({info}) => info && info.ok && info.kind && info.date)
       .map(({sym, info}) => ({ sym, info, date: new Date(info.date + 'T00:00:00') }))
-      .filter(({date}) => date >= lookback && date <= cutoff)
-      .sort((a, b) => a.date - b.date);  // chronological — oldest (most past) first, future dates last
+      .filter(({date}) => date >= lookback && date <= cutoff);
 
-    if(!entries.length){
+    // Three groups, in display priority order: earnings within the next
+    // 2 trading days first (so they're visible without scrolling), then
+    // recently-reported results newest-first, then anything further out.
+    const soon = entries.filter(e => e.info.kind === 'upcoming' && e.date <= soonCutoff)
+      .sort((a, b) => a.date - b.date);
+    const recent = entries.filter(e => e.info.kind === 'recent')
+      .sort((a, b) => b.date - a.date);
+    const later = entries.filter(e => e.info.kind === 'upcoming' && e.date > soonCutoff)
+      .sort((a, b) => a.date - b.date);
+    const ordered = [...soon, ...recent, ...later];
+
+    if(!ordered.length){
       el.innerHTML = `<div class="movers-empty">No recent or upcoming earnings in your watchlist</div>`;
       return;
     }
 
     const hourLabel = { bmo: 'before open', amc: 'after close', dmh: 'during hours' };
-    el.innerHTML = entries.map(({sym, info, date}) => {
+    el.innerHTML = ordered.map(({sym, info, date}) => {
       const dateStr = date.toLocaleDateString(undefined, {month:'short', day:'numeric'});
 
       if(info.kind === 'recent'){

@@ -106,8 +106,21 @@ print(f"[watchlist] using {WATCHLIST_FILE} (DATA_DIR={'set' if 'DATA_DIR' in os.
 # happen, which explains a lot of the "why did this reset" confusion.
 _process_started_at = time.time()
 _http = requests.Session()
+# Default urllib3 pool caps at 10 connections per host. With quotes (up
+# to 4 workers), PE (2), and earnings (2) all sharing this one session
+# and all hitting finnhub.io around the same refresh cycle, that's a
+# real bottleneck — raised well above worst-case concurrent demand
+# across every feature combined.
+_http_adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+_http.mount("https://", _http_adapter)
+_http.mount("http://", _http_adapter)
 
 CACHE_SECONDS = 60  # per-symbol, shared across all visitors requesting that symbol
+FAILED_QUOTE_CACHE_SECONDS = 10  # a FAILED quote is cached much more briefly
+    # than a successful one — otherwise a single bad fetch gets echoed back
+    # for the full 60s cache window, and since the frontend also refreshes
+    # on a ~60s cycle, a symbol that fails once could get "stuck" showing
+    # that same failure every cycle before ever getting a fair retry.
 
 
 def load_json_cache(filename):
@@ -335,7 +348,11 @@ def is_market_hours_with_buffer(buffer_minutes=15):
 
 def get_quote_cached(sym):
     entry = _quote_cache.get(sym)
-    if entry and (time.time() - entry["ts"]) < CACHE_SECONDS:
+    if not entry:
+        return None
+    age = time.time() - entry["ts"]
+    ttl = CACHE_SECONDS if entry["data"].get("ok") else FAILED_QUOTE_CACHE_SECONDS
+    if age < ttl:
         return entry["data"]
     return None
 
