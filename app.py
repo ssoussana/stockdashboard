@@ -247,12 +247,12 @@ def pwa_icon_512_maskable():
     return send_from_directory(".", "icon-512-maskable.png", mimetype="image/png")
 
 
-def fetch_quote_one(sym):
+def fetch_quote_one(sym, _retry=True):
     try:
         r = _http.get(
             "https://finnhub.io/api/v1/quote",
             params={"symbol": sym, "token": API_KEY},
-            timeout=6,
+            timeout=12,
         )
         r.raise_for_status()
         data = r.json()
@@ -262,8 +262,15 @@ def fetch_quote_one(sym):
     except requests.exceptions.HTTPError:
         # Report only the status code — never the underlying exception,
         # which embeds the full request URL including the API key.
-        return {"ok": False, "error": f"HTTP {r.status_code}"}
+        status = r.status_code
+        if _retry and status in (429, 500, 502, 503, 504):
+            time.sleep(2)
+            return fetch_quote_one(sym, _retry=False)
+        return {"ok": False, "error": f"HTTP {status}"}
     except Exception:
+        if _retry:
+            time.sleep(2)
+            return fetch_quote_one(sym, _retry=False)
         return {"ok": False, "error": "fetch failed"}
 
 
@@ -1672,6 +1679,53 @@ threading.Thread(target=_fed_prob_background_loop, daemon=True).start()
 
 
 # ---------- Standalone diagnostics — not used by the dashboard itself ----------
+@app.route("/api/debug/test-alt-vix-vxn")
+def test_alt_vix_vxn_debug():
+    """Checks whether Twelve Data, Finnhub, or Stooq can serve VIX/VXN as
+    a free alternative to FMP, which paywalls ^VXN (and possibly ^VIX —
+    same free-tier restriction that already hit ^TNX). Tries a few
+    plausible symbol formats per provider since conventions differ."""
+    results = {}
+
+    if TWELVE_DATA_API_KEY:
+        for sym in ["VIX", "VXN"]:
+            try:
+                r = _http.get(
+                    "https://api.twelvedata.com/quote",
+                    params={"symbol": sym, "apikey": TWELVE_DATA_API_KEY},
+                    timeout=(5, 15),
+                )
+                results[f"twelvedata_{sym}"] = {"status_code": r.status_code, "body": r.text[:500]}
+            except Exception as e:
+                results[f"twelvedata_{sym}"] = {"error": str(e)}
+    else:
+        results["twelvedata"] = {"error": "TWELVE_DATA_API_KEY not set"}
+
+    for sym in ["^VIX", "^VXN", "VIX", "VXN"]:
+        try:
+            r = _http.get(
+                "https://finnhub.io/api/v1/quote",
+                params={"symbol": sym, "token": API_KEY},
+                timeout=(5, 15),
+            )
+            results[f"finnhub_{sym}"] = {"status_code": r.status_code, "body": r.text[:500]}
+        except Exception as e:
+            results[f"finnhub_{sym}"] = {"error": str(e)}
+
+    for sym in ["^vix", "^vxn"]:
+        try:
+            r = _http.get(
+                "https://stooq.com/q/l/",
+                params={"s": sym, "f": "sd2t2ohlcv", "h": "", "e": "csv"},
+                timeout=(5, 15),
+            )
+            results[f"stooq_{sym}"] = {"status_code": r.status_code, "body": r.text[:500]}
+        except Exception as e:
+            results[f"stooq_{sym}"] = {"error": str(e)}
+
+    return jsonify(results)
+
+
 @app.route("/api/debug/twelvedata-symbol-search")
 def twelvedata_symbol_search_debug():
     """Query Twelve Data's own symbol reference directly (e.g. ?q=Dow Jones)
