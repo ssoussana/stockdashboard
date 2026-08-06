@@ -1715,6 +1715,33 @@ threading.Thread(target=_fed_prob_background_loop, daemon=True).start()
 
 
 # ---------- Standalone diagnostics — not used by the dashboard itself ----------
+@app.route("/api/debug/test-yahoo-chart")
+def test_yahoo_chart_debug():
+    """Tests Yahoo Finance's unofficial (undocumented, unauthenticated)
+    chart endpoint directly — the same one the yfinance Python library
+    wraps internally — without pulling in yfinance's heavy pandas/numpy
+    dependencies just to check one number. Main question: does Render's
+    cloud-hosting IP get blocked the way Stooq blocked us earlier, or
+    does this endpoint let it through?"""
+    results = {}
+    for sym in ["^VIX", "^VXN"]:
+        try:
+            r = _http.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+                params={"interval": "1d", "range": "1d"},
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+                timeout=(5, 15),
+            )
+            results[sym] = {
+                "status_code": r.status_code,
+                "is_html_block_page": r.text.lstrip().startswith("<"),
+                "body": r.text[:800],
+            }
+        except Exception as e:
+            results[sym] = {"error": str(e)}
+    return jsonify(results)
+
+
 @app.route("/api/debug/test-alt-vix-vxn")
 def test_alt_vix_vxn_debug():
     """Checks whether Twelve Data, Finnhub, or Stooq can serve VIX/VXN as
