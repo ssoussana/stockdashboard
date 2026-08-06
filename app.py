@@ -1884,6 +1884,17 @@ def fetch_via_live_stock_market(yahoo_symbol):
     }
 
 
+def no_fallback(reason):
+    """Fallback factory for indices with no reasonable ETF/proxy stand-in
+    (e.g. VXN — there's no widely-traded ETF that tracks Nasdaq-100
+    volatility the way SPY/DIA/ONEQ track their indices). Always raises,
+    so fetch_index_all cleanly reports "unavailable" instead of crashing
+    or silently showing something misleading."""
+    def fallback():
+        raise ValueError(reason)
+    return fallback
+
+
 def etf_fallback(etf_symbol):
     """Fallback factory — a tracking ETF via Finnhub, same source already
     used elsewhere in the app. Returns a no-arg callable."""
@@ -1926,12 +1937,14 @@ REAL_INDEX_SOURCES = {
     "sp500": (lambda: fetch_fmp_index_quote("^GSPC"), etf_fallback("SPY")),
     "crude_oil": (lambda: fetch_yahoo127_key_statistics("CL=F"), macro_fallback("crude_oil")),
     "treasury_10y": (lambda: fetch_via_live_stock_market("^TNX"), macro_fallback("treasury_10y")),
+    "vix": (lambda: fetch_fmp_index_quote("^VIX"), etf_fallback("VIXY")),
+    "vxn": (lambda: fetch_fmp_index_quote("^VXN"), no_fallback("no reliable ETF proxy for VXN (Nasdaq-100 volatility)")),
 }
 # Per-index cadence, sized to each quota:
-# - Dow, Nasdaq, and S&P 500 now share FMP's single 250/day free quota
-#   (nothing else in the app uses FMP). 15min each, market hours only
-#   (~7hrs/day): 7*60/15=28 calls/day per index * 3 = 84/day combined —
-#   comfortable margin under 250/day.
+# - Dow, Nasdaq, S&P 500, VIX, and VXN all share FMP's single 250/day
+#   free quota (nothing else in the app uses FMP). 15min each, market
+#   hours only (~7hrs/day): 7*60/15=28 calls/day per index * 5 = 140/day
+#   combined — comfortable margin under 250/day.
 # - Treasury now has the "live-stock-market" RapidAPI quota to itself
 #   (previously shared 3 ways with Dow/Nasdaq) — 25min ~= 364/mo, safely
 #   under its 500/mo cap with real margin to spare.
@@ -1944,6 +1957,8 @@ REAL_INDEX_CADENCE_SECONDS = {
     "sp500": 15 * 60,
     "crude_oil": 95 * 60,
     "treasury_10y": 25 * 60,
+    "vix": 15 * 60,
+    "vxn": 15 * 60,
 }
 _index_caches_loaded = load_json_cache("indices_cache.json")
 _index_caches = {key: _index_caches_loaded.get(key, {"data": None, "ts": 0}) for key in REAL_INDEX_SOURCES}
@@ -2118,6 +2133,8 @@ threading.Thread(target=_make_index_background_loop("sp500", 14), daemon=True).s
 threading.Thread(target=_make_index_background_loop("dow", 20), daemon=True).start()
 threading.Thread(target=_make_commodity_background_loop("crude_oil", 26), daemon=True).start()
 threading.Thread(target=_make_index_background_loop("treasury_10y", 32), daemon=True).start()
+threading.Thread(target=_make_index_background_loop("vix", 38), daemon=True).start()
+threading.Thread(target=_make_index_background_loop("vxn", 44), daemon=True).start()
 
 
 # ---------- Temporary: FMP free-tier exploration routes ----------

@@ -27,6 +27,8 @@
     --blue:#4d9eff;
     --yellow:#e8d33d;
     --lime:#a8d64b;
+    --orange:#e8823d;
+    --maroon:#8b2020;
     --sans:'Inter',system-ui,sans-serif;
     --mono:'IBM Plex Mono',ui-monospace,monospace;
   }
@@ -112,6 +114,17 @@
   .earn-row:last-child{border-bottom:none;}
   .earn-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:12px;color:var(--muted);padding-bottom:4px;}
   .fed-odds-text{font-family:var(--mono);font-size:13px;color:var(--text);cursor:help;}
+  .fear-gauge-row{display:flex;justify-content:space-between;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--border);}
+  .fear-gauge-row:last-child{border-bottom:none;}
+  .fear-gauge-name{font-family:var(--mono);font-weight:700;font-size:13px;color:var(--text);}
+  .fear-gauge-val{font-family:var(--mono);font-weight:700;font-size:18px;}
+  .fear-gauge-zone{font-family:var(--mono);font-size:11px;color:var(--muted);display:block;text-align:right;}
+  .fg-t1{color:var(--green);}
+  .fg-t2{color:var(--lime);}
+  .fg-t3{color:var(--amber);}
+  .fg-t4{color:var(--orange);}
+  .fg-t5{color:var(--red);}
+  .fg-t6{color:var(--maroon);}
   .fed-odds-text.odds-hike{color:var(--red);}
   .fed-odds-text.odds-cut{color:var(--green);}
   .fed-odds-text.odds-neutral{color:var(--text);}
@@ -249,6 +262,10 @@
     <div class="movers-col">
       <h2>Fed Calendar</h2>
       <div class="movers-list" id="fedCalendarList"><div class="movers-empty">Loading&hellip;</div></div>
+    </div>
+    <div class="movers-col">
+      <h2>Fear Gauges</h2>
+      <div class="movers-list" id="fearGaugesList"><div class="movers-empty">Loading&hellip;</div></div>
     </div>
   </div>
 
@@ -613,7 +630,7 @@ async function refreshFearGreed(){
 let _realIndexQuotes = { nasdaq: null, sp500: null, dow: null };
 
 async function refreshRealIndices(){
-  for(const key of ['nasdaq', 'sp500', 'dow', 'crude_oil', 'treasury_10y']){
+  for(const key of ['nasdaq', 'sp500', 'dow', 'crude_oil', 'treasury_10y', 'vix', 'vxn']){
     try{
       const res = await fetch(`/api/index/${key}`);
       const data = await res.json();
@@ -622,6 +639,56 @@ async function refreshRealIndices(){
       _realIndexQuotes[key] = null;
     }
   }
+  renderFearGauges();
+}
+
+// Exact bands from Steve's reference slides. VIX and VXN use different
+// thresholds (VXN runs structurally ~4pts higher than VIX, per the
+// VXN slide's own note), but map to the same 6-tier color language.
+const VIX_BANDS = [
+  { max: 12, zone: 'Extreme Greed', tier: 'fg-t1' },
+  { max: 15, zone: 'Greed', tier: 'fg-t2' },
+  { max: 20, zone: 'Slight Fear', tier: 'fg-t3' },
+  { max: 25, zone: 'Fear', tier: 'fg-t4' },
+  { max: 30, zone: 'Very Fearful', tier: 'fg-t5' },
+  { max: Infinity, zone: 'Extreme Fear', tier: 'fg-t6' },
+];
+const VXN_BANDS = [
+  { max: 15, zone: 'Complacency', tier: 'fg-t1' },
+  { max: 19, zone: 'Grind Zone', tier: 'fg-t2' },
+  { max: 25, zone: 'Slight Fear', tier: 'fg-t3' },
+  { max: 30, zone: 'Fear', tier: 'fg-t4' },
+  { max: 35, zone: 'Very Fearful', tier: 'fg-t5' },
+  { max: Infinity, zone: 'Extreme Fear', tier: 'fg-t6' },
+];
+
+function fearBand(value, bands){
+  return bands.find(b => value <= b.max) || bands[bands.length - 1];
+}
+
+function renderFearGauges(){
+  const el = document.getElementById('fearGaugesList');
+  if(!el) return;
+
+  function row(label, key, bands){
+    const q = _realIndexQuotes[key];
+    if(!q || !q.ok){
+      return `<div class="fear-gauge-row">
+        <span class="fear-gauge-name">${label}</span>
+        <span><span class="fear-gauge-val" style="color:var(--muted);">&mdash;</span></span>
+      </div>`;
+    }
+    const band = fearBand(q.c, bands);
+    return `<div class="fear-gauge-row">
+      <span class="fear-gauge-name">${label}</span>
+      <span style="text-align:right;">
+        <span class="fear-gauge-val ${band.tier}">${q.c.toFixed(2)}</span>
+        <span class="fear-gauge-zone">${band.zone}</span>
+      </span>
+    </div>`;
+  }
+
+  el.innerHTML = row('VIX', 'vix', VIX_BANDS) + row('VXN', 'vxn', VXN_BANDS);
 }
 
 function renderIndexStrip(){
