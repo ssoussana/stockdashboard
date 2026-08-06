@@ -845,6 +845,7 @@ async function refreshFedCalendar(){
 
     function formatLastValue(info){
       const sign = info.value >= 0 ? '+' : '';
+      if(info.unit === '% rate') return `${info.value}%`;  // a level (e.g. 4.1%), not a signed change
       if(info.unit === '%') return `${sign}${info.value}%`;
       if(info.unit === 'K claims') return `${info.value}K claims`;  // a level, not a signed change
       return `${sign}${info.value}K jobs`;
@@ -880,6 +881,12 @@ async function refreshFedCalendar(){
           // week is favorable (green), more is unfavorable (red).
           const chg = lastInfo.change;
           cls = (chg != null && chg < 0) ? 'up' : (chg != null && chg > 0) ? 'down' : '';
+        }else if(colorMode === 'unemployment'){
+          // Same idea as claims — the rate itself is always positive, so
+          // color by the month-over-month change: rate falling is
+          // favorable (green), rising is unfavorable (red).
+          const chg = lastInfo.change;
+          cls = (chg != null && chg < 0) ? 'up' : (chg != null && chg > 0) ? 'down' : '';
         }
         chip = `<span class="stat ${cls}">${formatLastValue(lastInfo)} (${dateStr})</span>`;
       }
@@ -901,6 +908,9 @@ async function refreshFedCalendar(){
       { label: 'Core PPI', lastInfo: data.ppi_last, nextDate: data.ppi && data.ppi.ok ? data.ppi.next_date : null, colorMode: 'sign-inverted' },
       { label: 'Jobs Report', lastInfo: data.jobs_last, nextDate: data.jobs && data.jobs.ok ? data.jobs.next_date : null, colorMode: 'sign' },
       { label: 'Jobless Claims', lastInfo: data.claims_last, nextDate: data.claims && data.claims.ok ? data.claims.next_date : null, colorMode: 'claims' },
+      // Same BLS Employment Situation release as Jobs Report, so it
+      // reuses the same next-release date rather than a separate one.
+      { label: 'Unemployment Rate', lastInfo: data.unemployment_rate_last, nextDate: data.jobs && data.jobs.ok ? data.jobs.next_date : null, colorMode: 'unemployment' },
     ];
     metricRows.sort((a, b) => {
       const dateA = (a.lastInfo && a.lastInfo.ok && a.lastInfo.date) ? a.lastInfo.date : '';

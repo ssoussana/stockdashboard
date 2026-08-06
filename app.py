@@ -1354,7 +1354,7 @@ _fed_cache = load_json_cache("fed_cache.json")
 
 # FRED release IDs (fixed, don't change): CPI = 10, PPI = 46.
 FRED_RELEASE_IDS = {"cpi": 10, "ppi": 46, "jobs": 50, "claims": 180}  # Employment Situation = 50, Unemployment Insurance Weekly Claims Report = 180
-FRED_LAST_VALUE_SERIES = {"cpi_last": "CPILFESL", "ppi_last": "PPICOR", "jobs_last": "PAYEMS", "claims_last": "ICSA"}
+FRED_LAST_VALUE_SERIES = {"cpi_last": "CPILFESL", "ppi_last": "PPICOR", "jobs_last": "PAYEMS", "claims_last": "ICSA", "unemployment_rate_last": "UNRATE"}
 # Current Fed funds target range — used as the baseline to classify
 # Kalshi's KXFED outcomes as hold/hike/cut, and to show "current: X-Y%"
 # alongside Market Odds. Updates same-day whenever the Fed actually
@@ -1458,6 +1458,16 @@ def fetch_fed_calendar():
                     change = round(r["change"] / 1000, 1) if r["change"] is not None else None
                     unit = "K claims"
                     out[key] = {"ok": True, "value": value, "change": change, "unit": unit, "date": r["date"]}
+                elif key == "unemployment_rate_last":
+                    # UNRATE is itself already a percentage (e.g. 4.1) —
+                    # show the level directly, not a month-over-month
+                    # change like CPI/PPI. Same BLS Employment Situation
+                    # release as jobs_last, so it reuses "jobs" for its
+                    # next-release date rather than a separate FRED release ID.
+                    value = round(r["value"], 1) if r["value"] is not None else None
+                    change = round(r["change"], 2) if r["change"] is not None else None  # percentage points vs prior month
+                    unit = "% rate"
+                    out[key] = {"ok": True, "value": value, "change": change, "unit": unit, "date": r["date"]}
                 else:
                     value = round(r["percent_change"], 2) if r["percent_change"] is not None else None
                     prior = round(r["prior_percent_change"], 2) if r["prior_percent_change"] is not None else None
@@ -1497,7 +1507,7 @@ def fed_calendar():
             "fomc": {"ok": True, **(next_fomc_meeting() or {"start": None, "end": None})},
         })
     if _fed_cache.get("data") is None:
-        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "jobs", "claims", "fomc", "cpi_last", "ppi_last", "jobs_last", "claims_last", "fed_funds_upper", "fed_funds_lower")})
+        return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "jobs", "claims", "fomc", "cpi_last", "ppi_last", "jobs_last", "claims_last", "unemployment_rate_last", "fed_funds_upper", "fed_funds_lower")})
     return jsonify(_fed_cache["data"])
 
 
