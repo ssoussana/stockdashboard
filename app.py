@@ -6,7 +6,7 @@ and serves the dashboard page. Your API key stays on your machine only —
 it's read from an environment variable and never sent to the browser.
 
 Setup:
-    pip install flask requests
+    pip install flask requests pywebpush
     export FINNHUB_API_KEY="your-key-here"
     export TWELVE_DATA_API_KEY="your-key-here"   (optional, powers the SMA/RSI line and
         after-hours prices — free at twelvedata.com, no card required. Without it,
@@ -14,6 +14,11 @@ Setup:
     export FRED_API_KEY="your-key-here"           (optional, powers real crude oil
         $/barrel and 10Y Treasury yield — free at fredaccount.stlouisfed.org, no
         card required, no paid tiers at all. Without it, that section is empty.)
+    export VAPID_PRIVATE_KEY="..."                (optional, powers calendar-event
+        push notifications — a one-time-generated keypair, not a third-party
+        account/API key. Without it, push notifications are silently disabled;
+        everything else still works.)
+    export VAPID_PUBLIC_KEY="..."
     python app.py
 
 Then open http://localhost:5000
@@ -31,6 +36,16 @@ from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 import requests
 from flask import Flask, jsonify, request, send_from_directory
+
+try:
+    from pywebpush import webpush, WebPushException
+    _PYWEBPUSH_AVAILABLE = True
+except ImportError:
+    # Push notifications are an optional feature — if pywebpush isn't
+    # installed (e.g. requirements.txt hasn't been updated yet on the
+    # deployed host), the rest of the dashboard should keep working
+    # normally, just without this one feature.
+    _PYWEBPUSH_AVAILABLE = False
 
 API_KEY = os.environ.get("FINNHUB_API_KEY")
 if not API_KEY:
@@ -55,6 +70,16 @@ FMP_API_KEY = os.environ.get("FMP_API_KEY")
 
 # Optional — only needed for real crude oil/treasury-yield data.
 FRED_API_KEY = os.environ.get("FRED_API_KEY")
+
+# Optional — powers calendar-event push notifications. This is a
+# self-generated keypair (not a third-party account), used to prove to
+# push services (Google's FCM, etc.) that pushes are coming from this
+# app specifically. If either is missing, push notifications are
+# silently disabled — no accounts, no signup, nothing else depends on it.
+VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY")
+VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY")
+VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "https://stockdashboard-mzg3.onrender.com")
+PUSH_ENABLED = _PYWEBPUSH_AVAILABLE and bool(VAPID_PRIVATE_KEY) and bool(VAPID_PUBLIC_KEY)
 
 # Optional — only needed for a real Nasdaq Composite index value. Falls
 # back to the ONEQ ETF proxy automatically if not set or if it fails.
@@ -129,6 +154,38 @@ def save_calendar_events():
 
 
 _calendar_events = load_calendar_events()
+
+# Push notification subscriptions — one entry per device that's opted
+# in (could be more than one, since the dashboard is shared with a
+# friend too). Each is the raw subscription object the browser's
+# PushManager returns (endpoint + keys), which is what pywebpush needs
+# to actually deliver a notification to that device.
+PUSH_SUBS_FILE = os.path.join(DATA_DIR, "push_subscriptions.json")
+_push_subs_lock = threading.Lock()
+
+
+def load_push_subscriptions():
+    try:
+        with open(PUSH_SUBS_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[push] failed to load {PUSH_SUBS_FILE}: {e!r}", flush=True)
+    return []
+
+
+def save_push_subscriptions():
+    try:
+        with open(PUSH_SUBS_FILE, "w") as f:
+            json.dump(_push_subscriptions, f)
+    except Exception as e:
+        print(f"[push] failed to save {PUSH_SUBS_FILE}: {e!r}", flush=True)
+
+
+_push_subscriptions = load_push_subscriptions()
 
 # One shared connection pool for every outbound call, instead of `requests`
 # implicitly building a fresh connection/SSL context on every single get().
@@ -468,6 +525,8 @@ def calendar_events_add():
         "completed": False,
         "completed_at": None,
         "created_at": time.time(),
+        "notified_urgent": False,
+        "notified_critical": False,
     }
     with _calendar_events_lock:
         prune_completed_calendar_events()
@@ -501,6 +560,134 @@ def calendar_events_delete(event_id):
             return jsonify({"ok": False, "error": "event not found"}), 404
         save_calendar_events()
     return jsonify({"ok": True, "events": _calendar_events})
+
+
+@app.route("/api/push/vapid-public-key")
+def push_vapid_public_key():
+    return jsonify({"enabled": PUSH_ENABLED, "publicKey": VAPID_PUBLIC_KEY if PUSH_ENABLED else None})
+
+
+@app.route("/api/push/subscribe", methods=["POST"])
+def push_subscribe():
+    if not PUSH_ENABLED:
+        return jsonify({"ok": False, "error": "push notifications aren't configured on this server"}), 503
+    sub = request.get_json(silent=True)
+    if not sub or not sub.get("endpoint"):
+        return jsonify({"ok": False, "error": "invalid subscription object"}), 400
+    with _push_subs_lock:
+        # Dedupe by endpoint — re-subscribing (e.g. after reinstalling
+        # the PWA) replaces the old entry rather than piling up duplicates.
+        _push_subscriptions[:] = [s for s in _push_subscriptions if s.get("endpoint") != sub["endpoint"]]
+        _push_subscriptions.append(sub)
+        save_push_subscriptions()
+    print(f"[push] new subscription registered ({len(_push_subscriptions)} total)", flush=True)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/push/unsubscribe", methods=["POST"])
+def push_unsubscribe():
+    body = request.get_json(silent=True) or {}
+    endpoint = body.get("endpoint")
+    with _push_subs_lock:
+        before = len(_push_subscriptions)
+        _push_subscriptions[:] = [s for s in _push_subscriptions if s.get("endpoint") != endpoint]
+        if len(_push_subscriptions) != before:
+            save_push_subscriptions()
+    return jsonify({"ok": True})
+
+
+def send_push_to_all(title, body, url="/", tag="market-pulse-calendar"):
+    """Sends a push notification to every registered device, pruning any
+    subscription that's no longer valid (e.g. the browser un-registered
+    it, or it's simply expired — a normal, expected occurrence with Web
+    Push, not an error worth surfacing beyond a log line)."""
+    if not PUSH_ENABLED or not _push_subscriptions:
+        return
+    payload = json.dumps({"title": title, "body": body, "url": url, "tag": tag})
+    still_valid = []
+    for sub in _push_subscriptions:
+        try:
+            webpush(
+                subscription_info=sub,
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims={"sub": f"mailto:{VAPID_SUBJECT}" if "@" in VAPID_SUBJECT else VAPID_SUBJECT},
+            )
+            still_valid.append(sub)
+        except WebPushException as e:
+            status = getattr(e.response, "status_code", None)
+            if status in (404, 410):
+                print(f"[push] subscription expired/gone (HTTP {status}), removing", flush=True)
+                # deliberately not appended to still_valid — this prunes it
+            else:
+                print(f"[push] send failed: {e!r}", flush=True)
+                still_valid.append(sub)  # keep it — might be a transient failure, not a dead subscription
+        except Exception as e:
+            print(f"[push] send raised unexpectedly: {e!r}", flush=True)
+            still_valid.append(sub)
+
+    if len(still_valid) != len(_push_subscriptions):
+        with _push_subs_lock:
+            _push_subscriptions[:] = still_valid
+            save_push_subscriptions()
+
+
+CALENDAR_NOTIFY_CHECK_SECONDS = 15 * 60  # how often to scan for events that just crossed into a notification tier
+
+
+def check_calendar_event_notifications():
+    """Same day-based urgency tiers as the frontend's display logic
+    (today = critical, next 2 days = urgent) — scans for incomplete
+    events that just crossed into one of those windows and haven't
+    already been notified for it, sends a push, and marks it sent so
+    it doesn't repeat every 15 minutes."""
+    if not PUSH_ENABLED:
+        return
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    changed = False
+    with _calendar_events_lock:
+        for e in _calendar_events:
+            if e.get("completed"):
+                continue
+            try:
+                event_date = datetime.strptime(e["date"], "%Y-%m-%d").date()
+            except (ValueError, KeyError):
+                continue
+            days_until = (event_date - today).days
+
+            if days_until == 0 and not e.get("notified_critical"):
+                send_push_to_all(
+                    title="Today: " + e["title"],
+                    body=f"This calendar event is today ({e['date']}).",
+                    tag=f"cal-critical-{e['id']}",
+                )
+                e["notified_critical"] = True
+                changed = True
+            elif 1 <= days_until <= 2 and not e.get("notified_urgent"):
+                send_push_to_all(
+                    title="Coming up: " + e["title"],
+                    body=f"This calendar event is in {days_until} day{'s' if days_until != 1 else ''} ({e['date']}).",
+                    tag=f"cal-urgent-{e['id']}",
+                )
+                e["notified_urgent"] = True
+                changed = True
+        if changed:
+            save_calendar_events()
+
+
+def _calendar_notify_background_loop():
+    print("[push] calendar notification thread started", flush=True)
+    time.sleep(50)  # staggered so background threads don't all burst-fetch simultaneously at boot
+    while True:
+        if PUSH_ENABLED:
+            try:
+                check_calendar_event_notifications()
+            except Exception as e:
+                print(f"[push] check_calendar_event_notifications raised: {e!r}", flush=True)
+        time.sleep(CALENDAR_NOTIFY_CHECK_SECONDS)
+
+
+threading.Thread(target=_calendar_notify_background_loop, daemon=True).start()
 
 
 @app.route("/api/quotes")

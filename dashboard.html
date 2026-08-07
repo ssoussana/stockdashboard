@@ -163,6 +163,13 @@
     width:30px;height:30px;border-radius:6px;cursor:pointer;flex-shrink:0;line-height:1;
   }
   .cal-add-btn:hover{opacity:.85;}
+  .push-toggle-btn{
+    background:none;border:1px solid var(--border);color:var(--muted);font-size:14px;
+    width:26px;height:26px;border-radius:6px;cursor:pointer;flex-shrink:0;line-height:1;
+  }
+  .push-toggle-btn:hover{border-color:var(--muted);color:var(--text);}
+  .push-toggle-btn.active{background:var(--green);border-color:var(--green);color:#08150e;}
+  .push-toggle-btn.unsupported{opacity:.4;cursor:not-allowed;}
   .cal-event-row{display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);}
   .cal-event-row:last-child{border-bottom:none;}
   .cal-event-checkbox{margin-top:3px;flex-shrink:0;cursor:pointer;accent-color:var(--green);width:14px;height:14px;}
@@ -307,7 +314,10 @@
       <div class="movers-list" id="fedCalendarList"><div class="movers-empty">Loading&hellip;</div></div>
     </div>
     <div class="movers-col height-matched-card">
-      <h2>Calendar</h2>
+      <h2 style="display:flex;align-items:center;justify-content:space-between;">
+        <span>Calendar</span>
+        <button id="pushToggleBtn" class="push-toggle-btn" title="Enable event reminders">&#128276;</button>
+      </h2>
       <div class="cal-add-row">
         <input type="text" id="calEventTitle" class="cal-input-title" placeholder="Event title..." maxlength="200">
         <input type="date" id="calEventDate" class="cal-input-date">
@@ -1364,6 +1374,93 @@ if('serviceWorker' in navigator){
   });
 }
 
+// ---------- Push notifications (calendar event reminders) ----------
+function urlBase64ToUint8Array(base64String){
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for(let i = 0; i < rawData.length; i++){
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+async function refreshPushButtonState(){
+  const btn = document.getElementById('pushToggleBtn');
+  if(!btn) return;
+  const supported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  if(!supported){
+    btn.classList.add('unsupported');
+    btn.title = 'Push notifications aren\'t supported in this browser';
+    return;
+  }
+  try{
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if(sub){
+      btn.classList.add('active');
+      btn.title = 'Event reminders are ON \u2014 click to turn off';
+    }else{
+      btn.classList.remove('active');
+      btn.title = 'Enable event reminders (push notifications)';
+    }
+  }catch(e){ /* non-fatal — button just shows its default state */ }
+}
+
+async function togglePushSubscription(){
+  const btn = document.getElementById('pushToggleBtn');
+  if(!btn || btn.classList.contains('unsupported')) return;
+
+  try{
+    const reg = await navigator.serviceWorker.ready;
+    const existing = await reg.pushManager.getSubscription();
+
+    if(existing){
+      // Turning OFF — unsubscribe locally and tell the server to drop it.
+      await fetch('/api/push/unsubscribe', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({endpoint: existing.endpoint}),
+      }).catch(() => {});
+      await existing.unsubscribe();
+      await refreshPushButtonState();
+      return;
+    }
+
+    // Turning ON — need the server's public key first, then real
+    // browser permission, then an actual push subscription.
+    const keyRes = await fetch('/api/push/vapid-public-key');
+    const keyData = await keyRes.json();
+    if(!keyData.enabled || !keyData.publicKey){
+      alert('Push notifications aren\'t configured on the server yet.');
+      return;
+    }
+
+    const permission = await Notification.requestPermission();
+    if(permission !== 'granted'){
+      return;  // user declined — nothing more to do, button just stays off
+    }
+
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(keyData.publicKey),
+    });
+
+    await fetch('/api/push/subscribe', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(sub),
+    });
+
+    await refreshPushButtonState();
+  }catch(e){
+    console.error('Push subscription toggle failed:', e);
+  }
+}
+
+document.getElementById('pushToggleBtn')?.addEventListener('click', togglePushSubscription);
+
 // Caps Earnings/Fed Calendar/Calendar's height to match the Sentiment +
 // Fear Gauges stack next to them, so all four bottoms line up evenly —
 // each card scrolls internally (via its .movers-list's overflow-y) once
@@ -1404,6 +1501,7 @@ window.addEventListener('resize', () => {
   refreshGold();
   refreshFedCalendar();
   refreshCalendarEvents();
+  refreshPushButtonState();
   syncPanelHeights();
   setTimeout(syncPanelHeights, 1200);  // re-check once the initial async data (which affects Fear Gauges' real height) has actually loaded, not just placeholder text
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
