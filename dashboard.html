@@ -19,6 +19,7 @@
     --text:#e7ebf2;
     --muted:#7c8593;
     --muted-dim:#535a66;
+    --muted-light:#aab3c0;
     --green:#1fd67a;
     --green-dim:#12472e;
     --red:#ff4d63;
@@ -71,7 +72,8 @@
     align-items:start;
   }
   @media (min-width:640px){ .top-panels{grid-template-columns:1fr 1fr;} }
-  @media (min-width:1500px){ .top-panels{grid-template-columns:260px 1fr 1fr 1fr 1fr 1fr;} }
+  @media (min-width:1500px){ .top-panels{grid-template-columns:260px 1fr 1fr 1fr;} }
+  .sentiment-stack{display:flex;flex-direction:column;gap:12px;}
   .gauge-wrap{display:flex;flex-direction:column;align-items:center;cursor:help;}
   .gauge-score{font-family:var(--sans);font-weight:800;font-size:44px;margin-top:-38px;letter-spacing:-0.02em;}
   .gauge-label{font-family:var(--mono);font-size:13px;letter-spacing:.06em;margin-top:2px;}
@@ -159,14 +161,17 @@
     width:30px;height:30px;border-radius:6px;cursor:pointer;flex-shrink:0;line-height:1;
   }
   .cal-add-btn:hover{opacity:.85;}
-  .cal-event-row{display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);}
+  .cal-event-row{display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);}
   .cal-event-row:last-child{border-bottom:none;}
   .cal-event-checkbox{margin-top:3px;flex-shrink:0;cursor:pointer;accent-color:var(--green);width:14px;height:14px;}
   .cal-event-body{flex:1;min-width:0;}
-  .cal-event-title{font-family:var(--sans);font-size:13px;color:var(--text);word-break:break-word;}
-  .cal-event-date{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px;}
+  .cal-event-title{font-family:var(--sans);font-size:14px;color:var(--text);word-break:break-word;}
+  .cal-event-date{font-family:var(--mono);font-size:13px;color:var(--muted-light);margin-top:3px;}
   .cal-event-row.completed .cal-event-title{color:var(--muted);text-decoration:line-through;}
   .cal-event-row.completed .cal-event-date{color:var(--muted-dim);}
+  /* Within 48 hours — bigger, bolder, and colored to stand out from the rest of the list. */
+  .cal-event-row.urgent .cal-event-title{font-size:16px;font-weight:700;color:var(--amber);}
+  .cal-event-row.urgent .cal-event-date{color:var(--amber);font-weight:600;}
   .cal-event-delete{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;flex-shrink:0;padding:0 2px;}
   .cal-event-delete:hover{color:var(--red);}
   .suggestions{
@@ -261,25 +266,31 @@
   </header>
 
   <div class="top-panels">
-    <div class="movers-col">
-      <div class="gauge-wrap" id="gaugeWrap" title="Loading sentiment breakdown…">
-        <h2 style="align-self:flex-start;">Sentiment</h2>
-        <svg width="200" height="120" viewBox="0 0 200 120">
-          <defs>
-            <linearGradient id="arcGrad" x1="0" y1="0" x2="1" y2="0">
-              <stop offset="0%" stop-color="#ff4d63"/>
-              <stop offset="25%" stop-color="#f2854b"/>
-              <stop offset="50%" stop-color="#f2d24b"/>
-              <stop offset="75%" stop-color="#a8d64b"/>
-              <stop offset="100%" stop-color="#1fd67a"/>
-            </linearGradient>
-          </defs>
-          <path d="M 15 100 A 85 85 0 0 1 185 100" fill="none" stroke="url(#arcGrad)" stroke-width="10" stroke-linecap="round"/>
-          <line id="needle" class="needle" x1="100" y1="100" x2="100" y2="28" stroke="#e7ebf2" stroke-width="3" stroke-linecap="round" transform="rotate(-90 100 100)"/>
-          <circle cx="100" cy="100" r="5" fill="#e7ebf2"/>
-        </svg>
-        <div class="gauge-score" id="fgScore">&mdash;</div>
-        <div class="gauge-label" id="fgLabel" style="color:var(--muted);">Loading&hellip;</div>
+    <div class="sentiment-stack">
+      <div class="movers-col">
+        <div class="gauge-wrap" id="gaugeWrap" title="Loading sentiment breakdown…">
+          <h2 style="align-self:flex-start;">Sentiment</h2>
+          <svg width="200" height="120" viewBox="0 0 200 120">
+            <defs>
+              <linearGradient id="arcGrad" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stop-color="#ff4d63"/>
+                <stop offset="25%" stop-color="#f2854b"/>
+                <stop offset="50%" stop-color="#f2d24b"/>
+                <stop offset="75%" stop-color="#a8d64b"/>
+                <stop offset="100%" stop-color="#1fd67a"/>
+              </linearGradient>
+            </defs>
+            <path d="M 15 100 A 85 85 0 0 1 185 100" fill="none" stroke="url(#arcGrad)" stroke-width="10" stroke-linecap="round"/>
+            <line id="needle" class="needle" x1="100" y1="100" x2="100" y2="28" stroke="#e7ebf2" stroke-width="3" stroke-linecap="round" transform="rotate(-90 100 100)"/>
+            <circle cx="100" cy="100" r="5" fill="#e7ebf2"/>
+          </svg>
+          <div class="gauge-score" id="fgScore">&mdash;</div>
+          <div class="gauge-label" id="fgLabel" style="color:var(--muted);">Loading&hellip;</div>
+        </div>
+      </div>
+      <div class="movers-col">
+        <h2>Fear Gauges</h2>
+        <div class="movers-list" id="fearGaugesList"><div class="movers-empty">Loading&hellip;</div></div>
       </div>
     </div>
     <div class="movers-col">
@@ -289,10 +300,6 @@
     <div class="movers-col">
       <h2>Fed Calendar</h2>
       <div class="movers-list" id="fedCalendarList"><div class="movers-empty">Loading&hellip;</div></div>
-    </div>
-    <div class="movers-col">
-      <h2>Fear Gauges</h2>
-      <div class="movers-list" id="fearGaugesList"><div class="movers-empty">Loading&hellip;</div></div>
     </div>
     <div class="movers-col">
       <h2>Calendar</h2>
@@ -736,6 +743,7 @@ function renderCalendarEvents(events){
     el.innerHTML = `<div class="movers-empty">No events yet</div>`;
     return;
   }
+  const today = new Date(); today.setHours(0,0,0,0);
   // Soonest-upcoming first — the standard calendar/todo convention.
   // Completed items aren't hidden or reordered, just struck through, so
   // checking something off doesn't make it jump around in the list.
@@ -743,7 +751,13 @@ function renderCalendarEvents(events){
   el.innerHTML = sorted.map(ev => {
     const d = new Date(ev.date + 'T00:00:00');
     const dateStr = d.toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric', year:'numeric'});
-    return `<div class="cal-event-row ${ev.completed ? 'completed' : ''}">
+    // Events only carry a date, not a time, so "within 48 hours" is
+    // computed in whole days rather than exact hours: today (0), tomorrow
+    // (1), or the day after (2) all count — roughly a 48-hour window.
+    const daysUntil = Math.round((d - today) / 86400000);
+    const isUrgent = !ev.completed && daysUntil >= 0 && daysUntil <= 2;
+    const rowClasses = ['cal-event-row', ev.completed ? 'completed' : '', isUrgent ? 'urgent' : ''].filter(Boolean).join(' ');
+    return `<div class="${rowClasses}">
       <input type="checkbox" class="cal-event-checkbox" ${ev.completed ? 'checked' : ''} data-id="${ev.id}">
       <div class="cal-event-body">
         <div class="cal-event-title">${ev.title.replace(/</g,'&lt;')}</div>
