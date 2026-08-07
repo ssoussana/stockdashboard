@@ -114,7 +114,7 @@
   .earn-row:last-child{border-bottom:none;}
   .earn-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-family:var(--mono);font-size:12px;color:var(--muted);padding-bottom:4px;}
   .fed-odds-text{font-family:var(--mono);font-size:13px;color:var(--text);cursor:help;}
-  .fear-gauge-row{display:flex;justify-content:space-between;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--border);}
+  .fear-gauge-row{display:flex;justify-content:space-between;align-items:baseline;padding:6px 0;border-bottom:1px solid var(--border);cursor:help;}
   .fear-gauge-row:last-child{border-bottom:none;}
   .fear-gauge-name{font-family:var(--mono);font-weight:700;font-size:13px;color:var(--text);}
   .fear-gauge-val{font-family:var(--mono);font-weight:700;font-size:18px;}
@@ -679,7 +679,8 @@ function renderFearGauges(){
       </div>`;
     }
     const band = fearBand(q.c, bands);
-    return `<div class="fear-gauge-row">
+    const tip = q.fetchedAt ? `data fetched ${new Date(q.fetchedAt * 1000).toLocaleString()}` : 'fetch time unknown';
+    return `<div class="fear-gauge-row" title="${tip}">
       <span class="fear-gauge-name">${label}</span>
       <span style="text-align:right;">
         <span class="fear-gauge-val ${band.tier}">${q.c.toFixed(2)}</span>
