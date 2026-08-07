@@ -71,7 +71,7 @@
     align-items:start;
   }
   @media (min-width:640px){ .top-panels{grid-template-columns:1fr 1fr;} }
-  @media (min-width:1500px){ .top-panels{grid-template-columns:260px 1fr 1fr 1fr 1fr;} }
+  @media (min-width:1500px){ .top-panels{grid-template-columns:260px 1fr 1fr 1fr 1fr 1fr;} }
   .gauge-wrap{display:flex;flex-direction:column;align-items:center;cursor:help;}
   .gauge-score{font-family:var(--sans);font-weight:800;font-size:44px;margin-top:-38px;letter-spacing:-0.02em;}
   .gauge-label{font-family:var(--mono);font-size:13px;letter-spacing:.06em;margin-top:2px;}
@@ -142,6 +142,33 @@
     font-family:var(--mono);font-size:13px;padding:7px 10px;border-radius:6px;width:220px;
   }
   .add-box input::placeholder{color:var(--muted-dim);}
+  .cal-add-row{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;}
+  .cal-input-title{
+    background:var(--panel);border:1px solid var(--border);color:var(--text);
+    font-family:var(--mono);font-size:12px;padding:6px 8px;border-radius:6px;
+    flex:1 1 100px;min-width:80px;
+  }
+  .cal-input-date{
+    background:var(--panel);border:1px solid var(--border);color:var(--text);
+    font-family:var(--mono);font-size:12px;padding:6px 8px;border-radius:6px;
+    color-scheme:dark;
+  }
+  .cal-input-title::placeholder{color:var(--muted-dim);}
+  .cal-add-btn{
+    background:var(--green);border:none;color:#08150e;font-weight:700;font-size:16px;
+    width:30px;height:30px;border-radius:6px;cursor:pointer;flex-shrink:0;line-height:1;
+  }
+  .cal-add-btn:hover{opacity:.85;}
+  .cal-event-row{display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);}
+  .cal-event-row:last-child{border-bottom:none;}
+  .cal-event-checkbox{margin-top:3px;flex-shrink:0;cursor:pointer;accent-color:var(--green);width:14px;height:14px;}
+  .cal-event-body{flex:1;min-width:0;}
+  .cal-event-title{font-family:var(--sans);font-size:13px;color:var(--text);word-break:break-word;}
+  .cal-event-date{font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px;}
+  .cal-event-row.completed .cal-event-title{color:var(--muted);text-decoration:line-through;}
+  .cal-event-row.completed .cal-event-date{color:var(--muted-dim);}
+  .cal-event-delete{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;flex-shrink:0;padding:0 2px;}
+  .cal-event-delete:hover{color:var(--red);}
   .suggestions{
     position:absolute;top:calc(100% + 4px);right:0;width:280px;
     background:var(--panel-hi);border:1px solid var(--border);border-radius:8px;
@@ -266,6 +293,15 @@
     <div class="movers-col">
       <h2>Fear Gauges</h2>
       <div class="movers-list" id="fearGaugesList"><div class="movers-empty">Loading&hellip;</div></div>
+    </div>
+    <div class="movers-col">
+      <h2>Calendar</h2>
+      <div class="cal-add-row">
+        <input type="text" id="calEventTitle" class="cal-input-title" placeholder="Event title..." maxlength="200">
+        <input type="date" id="calEventDate" class="cal-input-date">
+        <button id="calEventAddBtn" class="cal-add-btn" title="Add event">+</button>
+      </div>
+      <div class="movers-list" id="calendarEventsList"><div class="movers-empty">Loading&hellip;</div></div>
     </div>
   </div>
 
@@ -691,6 +727,93 @@ function renderFearGauges(){
 
   el.innerHTML = row('VIX', 'vix', VIX_BANDS) + row('VXN', 'vxn', VXN_BANDS);
 }
+
+// ---------- Custom calendar events ----------
+function renderCalendarEvents(events){
+  const el = document.getElementById('calendarEventsList');
+  if(!el) return;
+  if(!events || !events.length){
+    el.innerHTML = `<div class="movers-empty">No events yet</div>`;
+    return;
+  }
+  // Soonest-upcoming first — the standard calendar/todo convention.
+  // Completed items aren't hidden or reordered, just struck through, so
+  // checking something off doesn't make it jump around in the list.
+  const sorted = [...events].sort((a, b) => a.date.localeCompare(b.date));
+  el.innerHTML = sorted.map(ev => {
+    const d = new Date(ev.date + 'T00:00:00');
+    const dateStr = d.toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric', year:'numeric'});
+    return `<div class="cal-event-row ${ev.completed ? 'completed' : ''}">
+      <input type="checkbox" class="cal-event-checkbox" ${ev.completed ? 'checked' : ''} data-id="${ev.id}">
+      <div class="cal-event-body">
+        <div class="cal-event-title">${ev.title.replace(/</g,'&lt;')}</div>
+        <div class="cal-event-date">${dateStr}</div>
+      </div>
+      <button class="cal-event-delete" data-id="${ev.id}" title="Delete event">&times;</button>
+    </div>`;
+  }).join('');
+}
+
+async function refreshCalendarEvents(){
+  try{
+    const res = await fetch('/api/calendar-events');
+    const events = await res.json();
+    renderCalendarEvents(events);
+  }catch(e){
+    document.getElementById('calendarEventsList').innerHTML = `<div class="movers-empty">unavailable</div>`;
+  }
+}
+
+async function addCalendarEvent(){
+  const titleEl = document.getElementById('calEventTitle');
+  const dateEl = document.getElementById('calEventDate');
+  const title = titleEl.value.trim();
+  const date = dateEl.value;
+  if(!title || !date) return;
+  try{
+    const res = await fetch('/api/calendar-events/add', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title, date}),
+    });
+    const data = await res.json();
+    if(data.ok){
+      titleEl.value = '';
+      dateEl.value = '';
+      renderCalendarEvents(data.events);
+    }
+  }catch(e){ /* non-fatal — the row just won't clear/update this time */ }
+}
+
+document.getElementById('calEventAddBtn').addEventListener('click', addCalendarEvent);
+document.getElementById('calEventTitle').addEventListener('keydown', (e) => {
+  if(e.key === 'Enter') addCalendarEvent();
+});
+document.getElementById('calEventDate').addEventListener('keydown', (e) => {
+  if(e.key === 'Enter') addCalendarEvent();
+});
+
+document.getElementById('calendarEventsList').addEventListener('click', async (e) => {
+  const del = e.target.closest('.cal-event-delete');
+  if(del){
+    const id = del.dataset.id;
+    try{
+      const res = await fetch(`/api/calendar-events/${id}`, {method: 'DELETE'});
+      const data = await res.json();
+      if(data.ok) renderCalendarEvents(data.events);
+    }catch(err){ /* non-fatal */ }
+    return;
+  }
+  const checkbox = e.target.closest('.cal-event-checkbox');
+  if(checkbox){
+    const id = checkbox.dataset.id;
+    try{
+      const res = await fetch(`/api/calendar-events/${id}/toggle`, {method: 'POST'});
+      const data = await res.json();
+      if(data.ok) renderCalendarEvents(data.events);
+    }catch(err){ /* non-fatal */ }
+  }
+});
 
 function renderIndexStrip(){
   const strip = document.getElementById('indexStripCore');
@@ -1228,12 +1351,14 @@ if('serviceWorker' in navigator){
   refreshPE();
   refreshGold();
   refreshFedCalendar();
+  refreshCalendarEvents();
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(refreshEarnings, 60 * 60 * 1000);
   setInterval(refreshPE, 60 * 60 * 1000);
   setInterval(refreshGold, 60 * 60 * 1000);
   setInterval(refreshFedCalendar, 60 * 60 * 1000);
+  setInterval(refreshCalendarEvents, 5 * 60 * 1000);  // shared/editable by anyone viewing — catches changes made by another viewer
   setInterval(tickCountdown, 1000);
 })();
 </script>

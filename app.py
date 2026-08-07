@@ -25,6 +25,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
@@ -97,6 +98,88 @@ def save_shared_watchlist():
 
 _shared_watchlist = load_shared_watchlist()
 print(f"[watchlist] using {WATCHLIST_FILE} (DATA_DIR={'set' if 'DATA_DIR' in os.environ else 'default, NOT persistent across deploys'})", flush=True)
+
+
+# Custom calendar events — same sharing/persistence model as the
+# watchlist above: one shared list, everyone viewing the dashboard sees
+# and can edit the same events.
+CALENDAR_EVENTS_FILE = os.path.join(DATA_DIR, "calendar_events.json")
+_calendar_events_lock = threading.Lock()
+
+
+def load_calendar_events():
+    try:
+        with open(CALENDAR_EVENTS_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[calendar] failed to load {CALENDAR_EVENTS_FILE}: {e!r}", flush=True)
+    return []
+
+
+def save_calendar_events():
+    try:
+        with open(CALENDAR_EVENTS_FILE, "w") as f:
+            json.dump(_calendar_events, f)
+    except Exception as e:
+        print(f"[calendar] failed to save {CALENDAR_EVENTS_FILE}: {e!r}", flush=True)
+
+
+_calendar_events = load_calendar_events()
+
+
+@app.route("/api/calendar-events")
+def calendar_events():
+    return jsonify(_calendar_events)
+
+
+@app.route("/api/calendar-events/add", methods=["POST"])
+def calendar_events_add():
+    body = request.get_json(silent=True) or {}
+    title = (body.get("title") or "").strip()
+    date = (body.get("date") or "").strip()
+    if not title or not date:
+        return jsonify({"error": "title and date are both required"}), 400
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+    event = {
+        "id": uuid.uuid4().hex[:12],
+        "title": title[:200],  # a generous cap, just to keep one bad entry from blowing up the card's layout
+        "date": date,
+        "completed": False,
+        "created_at": time.time(),
+    }
+    with _calendar_events_lock:
+        _calendar_events.append(event)
+        save_calendar_events()
+    return jsonify({"ok": True, "events": _calendar_events})
+
+
+@app.route("/api/calendar-events/<event_id>/toggle", methods=["POST"])
+def calendar_events_toggle(event_id):
+    with _calendar_events_lock:
+        for e in _calendar_events:
+            if e["id"] == event_id:
+                e["completed"] = not e["completed"]
+                save_calendar_events()
+                return jsonify({"ok": True, "events": _calendar_events})
+    return jsonify({"ok": False, "error": "event not found"}), 404
+
+
+@app.route("/api/calendar-events/<event_id>", methods=["DELETE"])
+def calendar_events_delete(event_id):
+    with _calendar_events_lock:
+        before = len(_calendar_events)
+        _calendar_events[:] = [e for e in _calendar_events if e["id"] != event_id]
+        if len(_calendar_events) == before:
+            return jsonify({"ok": False, "error": "event not found"}), 404
+        save_calendar_events()
+    return jsonify({"ok": True, "events": _calendar_events})
 
 # One shared connection pool for every outbound call, instead of `requests`
 # implicitly building a fresh connection/SSL context on every single get().
