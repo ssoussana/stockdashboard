@@ -174,6 +174,9 @@
   /* Within 48 hours — bigger, bolder, and colored to stand out from the rest of the list. */
   .cal-event-row.urgent .cal-event-title{font-size:16px;font-weight:700;color:var(--amber);}
   .cal-event-row.urgent .cal-event-date{color:var(--amber);font-weight:600;}
+  /* Today specifically (within 24 hours) — more urgent than the rest of the 48hr window, so it gets red instead of amber. */
+  .cal-event-row.critical .cal-event-title{font-size:16px;font-weight:700;color:var(--red);}
+  .cal-event-row.critical .cal-event-date{color:var(--red);font-weight:600;}
   .cal-event-delete{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;flex-shrink:0;padding:0 2px;}
   .cal-event-delete:hover{color:var(--red);}
   .suggestions{
@@ -756,9 +759,12 @@ function renderCalendarEvents(events){
     // Events only carry a date, not a time, so "within 48 hours" is
     // computed in whole days rather than exact hours: today (0), tomorrow
     // (1), or the day after (2) all count — roughly a 48-hour window.
+    // Today specifically is more urgent than the rest of that window, so
+    // it gets its own red "critical" tier rather than sharing amber.
     const daysUntil = Math.round((d - today) / 86400000);
-    const isUrgent = !ev.completed && daysUntil >= 0 && daysUntil <= 2;
-    const rowClasses = ['cal-event-row', ev.completed ? 'completed' : '', isUrgent ? 'urgent' : ''].filter(Boolean).join(' ');
+    const isCritical = !ev.completed && daysUntil === 0;
+    const isUrgent = !ev.completed && !isCritical && daysUntil >= 1 && daysUntil <= 2;
+    const rowClasses = ['cal-event-row', ev.completed ? 'completed' : '', isCritical ? 'critical' : (isUrgent ? 'urgent' : '')].filter(Boolean).join(' ');
     return `<div class="${rowClasses}">
       <input type="checkbox" class="cal-event-checkbox" ${ev.completed ? 'checked' : ''} data-id="${ev.id}">
       <div class="cal-event-body">
