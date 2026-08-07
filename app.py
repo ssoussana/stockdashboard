@@ -424,9 +424,30 @@ def remove_from_watchlist():
     return jsonify({"symbols": symbols})
 
 
+COMPLETED_EVENT_TTL_SECONDS = 7 * 24 * 60 * 60  # auto-removed 7 days after being checked off
+
+
+def prune_completed_calendar_events():
+    """Removes events that have been marked complete for more than 7
+    days. Run lazily on every calendar-events request rather than via a
+    dedicated background thread — this app already has a lot of those,
+    and this is cheap enough (a handful of list comparisons) to just do
+    inline whenever the list is touched anyway."""
+    now = time.time()
+    before = len(_calendar_events)
+    _calendar_events[:] = [
+        e for e in _calendar_events
+        if not (e.get("completed") and e.get("completed_at") and (now - e["completed_at"]) > COMPLETED_EVENT_TTL_SECONDS)
+    ]
+    if len(_calendar_events) != before:
+        save_calendar_events()
+
+
 @app.route("/api/calendar-events")
 def calendar_events():
-    return jsonify(_calendar_events)
+    with _calendar_events_lock:
+        prune_completed_calendar_events()
+        return jsonify(_calendar_events)
 
 
 @app.route("/api/calendar-events/add", methods=["POST"])
@@ -445,9 +466,11 @@ def calendar_events_add():
         "title": title[:200],  # a generous cap, just to keep one bad entry from blowing up the card's layout
         "date": date,
         "completed": False,
+        "completed_at": None,
         "created_at": time.time(),
     }
     with _calendar_events_lock:
+        prune_completed_calendar_events()
         _calendar_events.append(event)
         save_calendar_events()
     return jsonify({"ok": True, "events": _calendar_events})
@@ -456,9 +479,14 @@ def calendar_events_add():
 @app.route("/api/calendar-events/<event_id>/toggle", methods=["POST"])
 def calendar_events_toggle(event_id):
     with _calendar_events_lock:
+        prune_completed_calendar_events()
         for e in _calendar_events:
             if e["id"] == event_id:
                 e["completed"] = not e["completed"]
+                # Starts (or resets) the 7-day countdown when checked; clears
+                # it if unchecked, since an active event shouldn't be on a
+                # removal timer at all.
+                e["completed_at"] = time.time() if e["completed"] else None
                 save_calendar_events()
                 return jsonify({"ok": True, "events": _calendar_events})
     return jsonify({"ok": False, "error": "event not found"}), 404
