@@ -130,57 +130,6 @@ def save_calendar_events():
 
 _calendar_events = load_calendar_events()
 
-
-@app.route("/api/calendar-events")
-def calendar_events():
-    return jsonify(_calendar_events)
-
-
-@app.route("/api/calendar-events/add", methods=["POST"])
-def calendar_events_add():
-    body = request.get_json(silent=True) or {}
-    title = (body.get("title") or "").strip()
-    date = (body.get("date") or "").strip()
-    if not title or not date:
-        return jsonify({"error": "title and date are both required"}), 400
-    try:
-        datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
-    event = {
-        "id": uuid.uuid4().hex[:12],
-        "title": title[:200],  # a generous cap, just to keep one bad entry from blowing up the card's layout
-        "date": date,
-        "completed": False,
-        "created_at": time.time(),
-    }
-    with _calendar_events_lock:
-        _calendar_events.append(event)
-        save_calendar_events()
-    return jsonify({"ok": True, "events": _calendar_events})
-
-
-@app.route("/api/calendar-events/<event_id>/toggle", methods=["POST"])
-def calendar_events_toggle(event_id):
-    with _calendar_events_lock:
-        for e in _calendar_events:
-            if e["id"] == event_id:
-                e["completed"] = not e["completed"]
-                save_calendar_events()
-                return jsonify({"ok": True, "events": _calendar_events})
-    return jsonify({"ok": False, "error": "event not found"}), 404
-
-
-@app.route("/api/calendar-events/<event_id>", methods=["DELETE"])
-def calendar_events_delete(event_id):
-    with _calendar_events_lock:
-        before = len(_calendar_events)
-        _calendar_events[:] = [e for e in _calendar_events if e["id"] != event_id]
-        if len(_calendar_events) == before:
-            return jsonify({"ok": False, "error": "event not found"}), 404
-        save_calendar_events()
-    return jsonify({"ok": True, "events": _calendar_events})
-
 # One shared connection pool for every outbound call, instead of `requests`
 # implicitly building a fresh connection/SSL context on every single get().
 # On a memory-constrained instance (this app's free-tier host gives it only
@@ -473,6 +422,57 @@ def remove_from_watchlist():
             save_shared_watchlist()
         symbols = list(_shared_watchlist)
     return jsonify({"symbols": symbols})
+
+
+@app.route("/api/calendar-events")
+def calendar_events():
+    return jsonify(_calendar_events)
+
+
+@app.route("/api/calendar-events/add", methods=["POST"])
+def calendar_events_add():
+    body = request.get_json(silent=True) or {}
+    title = (body.get("title") or "").strip()
+    date = (body.get("date") or "").strip()
+    if not title or not date:
+        return jsonify({"error": "title and date are both required"}), 400
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"error": "date must be in YYYY-MM-DD format"}), 400
+    event = {
+        "id": uuid.uuid4().hex[:12],
+        "title": title[:200],  # a generous cap, just to keep one bad entry from blowing up the card's layout
+        "date": date,
+        "completed": False,
+        "created_at": time.time(),
+    }
+    with _calendar_events_lock:
+        _calendar_events.append(event)
+        save_calendar_events()
+    return jsonify({"ok": True, "events": _calendar_events})
+
+
+@app.route("/api/calendar-events/<event_id>/toggle", methods=["POST"])
+def calendar_events_toggle(event_id):
+    with _calendar_events_lock:
+        for e in _calendar_events:
+            if e["id"] == event_id:
+                e["completed"] = not e["completed"]
+                save_calendar_events()
+                return jsonify({"ok": True, "events": _calendar_events})
+    return jsonify({"ok": False, "error": "event not found"}), 404
+
+
+@app.route("/api/calendar-events/<event_id>", methods=["DELETE"])
+def calendar_events_delete(event_id):
+    with _calendar_events_lock:
+        before = len(_calendar_events)
+        _calendar_events[:] = [e for e in _calendar_events if e["id"] != event_id]
+        if len(_calendar_events) == before:
+            return jsonify({"ok": False, "error": "event not found"}), 404
+        save_calendar_events()
+    return jsonify({"ok": True, "events": _calendar_events})
 
 
 @app.route("/api/quotes")
