@@ -99,7 +99,8 @@
   .index-strip .idx .chg.down{color:var(--red);}
 
   /* Market movers */
-  .movers-col{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;}
+  .movers-col{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;}
+  .height-matched-card .movers-list{flex:1;min-height:0;overflow-y:auto;}
   .movers-col h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;font-family:var(--mono);font-weight:600;}
   .movers-empty{font-family:var(--mono);font-size:12px;color:var(--muted);padding:6px 0;}
   .movers-row{
@@ -130,8 +131,9 @@
   .fed-odds-text.odds-hike{color:var(--red);}
   .fed-odds-text.odds-cut{color:var(--green);}
   .fed-odds-text.odds-neutral{color:var(--text);}
-  #earningsList{max-height:225px;overflow-y:auto;}
-  #fedCalendarList{max-height:225px;overflow-y:auto;}
+  /* #earningsList/#fedCalendarList/#calendarEventsList height is now set
+     dynamically via JS (syncPanelHeights) to match the sentiment/fear
+     gauges stack, rather than a fixed pixel value here. */
   .earn-stats .up{color:var(--green);}
   .earn-stats .down{color:var(--red);}
 
@@ -293,15 +295,15 @@
         <div class="movers-list" id="fearGaugesList"><div class="movers-empty">Loading&hellip;</div></div>
       </div>
     </div>
-    <div class="movers-col">
+    <div class="movers-col height-matched-card">
       <h2>Earnings (Watchlist)</h2>
       <div class="movers-list" id="earningsList"><div class="movers-empty">Loading&hellip;</div></div>
     </div>
-    <div class="movers-col">
+    <div class="movers-col height-matched-card">
       <h2>Fed Calendar</h2>
       <div class="movers-list" id="fedCalendarList"><div class="movers-empty">Loading&hellip;</div></div>
     </div>
-    <div class="movers-col">
+    <div class="movers-col height-matched-card">
       <h2>Calendar</h2>
       <div class="cal-add-row">
         <input type="text" id="calEventTitle" class="cal-input-title" placeholder="Event title..." maxlength="200">
@@ -1356,6 +1358,36 @@ if('serviceWorker' in navigator){
   });
 }
 
+// Caps Earnings/Fed Calendar/Calendar's height to match the Sentiment +
+// Fear Gauges stack next to them, so all four bottoms line up evenly —
+// each card scrolls internally (via its .movers-list's overflow-y) once
+// its own content exceeds that shared height, rather than growing past
+// it. Done in JS rather than pure CSS because Calendar's list can grow
+// arbitrarily long as events are added, which would otherwise make IT
+// the tallest item and stretch everything else to match instead.
+function syncPanelHeights(){
+  const stack = document.querySelector('.sentiment-stack');
+  const cards = document.querySelectorAll('.height-matched-card');
+  if(!stack || !cards.length) return;
+
+  // Below the wide-screen breakpoint the grid wraps (2-col or 1-col),
+  // so sentiment-stack isn't necessarily in the same row as these cards
+  // any more — let them size naturally instead of matching to it.
+  if(window.innerWidth < 1500){
+    cards.forEach(c => { c.style.maxHeight = ''; });
+    return;
+  }
+
+  const targetHeight = stack.getBoundingClientRect().height;
+  cards.forEach(c => { c.style.maxHeight = `${targetHeight}px`; });
+}
+
+let _syncPanelHeightsTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(_syncPanelHeightsTimer);
+  _syncPanelHeightsTimer = setTimeout(syncPanelHeights, 150);
+});
+
 (async function init(){
   SYMBOLS = await loadSharedWatchlist();
   buildCards();
@@ -1366,6 +1398,8 @@ if('serviceWorker' in navigator){
   refreshGold();
   refreshFedCalendar();
   refreshCalendarEvents();
+  syncPanelHeights();
+  setTimeout(syncPanelHeights, 1200);  // re-check once the initial async data (which affects Fear Gauges' real height) has actually loaded, not just placeholder text
   setInterval(async () => { await syncWatchlist(); refreshAll(); }, REFRESH_MS);
   setInterval(refreshSma, SMA_REFRESH_MS);
   setInterval(refreshEarnings, 60 * 60 * 1000);
