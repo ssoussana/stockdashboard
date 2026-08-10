@@ -1020,7 +1020,13 @@ async function refreshFedCalendar(){
 
       let chip = '';
       if(hasLast){
-        const dateStr = lastInfo.date ? new Date(lastInfo.date+'T00:00:00').toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '';
+        // Claims reports weekly, so it needs the specific date (which
+        // week) to stay meaningful — the others report monthly, where a
+        // day-of-month number reads misleadingly like "when this was
+        // reported" rather than "which period this covers".
+        const dateStr = lastInfo.date
+          ? new Date(lastInfo.date+'T00:00:00').toLocaleDateString(undefined, colorMode === 'claims' ? {month:'short',day:'numeric'} : {month:'short',year:'numeric'})
+          : '';
         let cls = '';
         if(colorMode === 'sign'){
           // Jobs — more added is unambiguously favorable, no benchmark needed.
@@ -1044,7 +1050,7 @@ async function refreshFedCalendar(){
           const chg = lastInfo.change;
           cls = (chg != null && chg < 0) ? 'up' : (chg != null && chg > 0) ? 'down' : '';
         }
-        chip = `<span class="stat ${cls}">${formatLastValue(lastInfo)} (${dateStr})</span>`;
+        chip = `<span class="stat ${cls}">${formatLastValue(lastInfo)} (${dateStr} data)</span>`;
       }
 
       return `<div class="earn-row">
