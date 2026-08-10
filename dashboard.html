@@ -1170,8 +1170,8 @@ async function refreshEarnings(){
     const res = await fetch(`/api/earnings?symbols=${SYMBOLS.join(',')}`);
     const data = await res.json();
     const today = new Date(); today.setHours(0,0,0,0);
-    const cutoff = new Date(today); cutoff.setDate(cutoff.getDate() + 60);
-    const lookback = new Date(today); lookback.setDate(lookback.getDate() - 14);
+    const upcomingCutoff = new Date(today); upcomingCutoff.setDate(upcomingCutoff.getDate() + 30);  // upcoming earnings shown up to 30 days out
+    const reportedLookback = new Date(today); reportedLookback.setDate(reportedLookback.getDate() - 7);  // reported earnings stay visible for 7 days after reporting
 
     function addTradingDays(date, n){
       const d = new Date(date);
@@ -1189,7 +1189,7 @@ async function refreshEarnings(){
       .map(sym => ({ sym, info: data[sym] }))
       .filter(({info}) => info && info.ok && info.kind && info.date)
       .map(({sym, info}) => ({ sym, info, date: new Date(info.date + 'T00:00:00') }))
-      .filter(({date}) => date >= lookback && date <= cutoff);
+      .filter(({info, date}) => info.kind === 'recent' ? date >= reportedLookback : date <= upcomingCutoff);
 
     // Three groups, in display priority order: earnings within the next
     // 2 trading days first (so they're visible without scrolling), then
