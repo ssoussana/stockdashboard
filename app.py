@@ -1829,7 +1829,9 @@ def fed_calendar():
         })
     if _fed_cache.get("data") is None:
         return jsonify({k: {"ok": False, "error": "not fetched yet"} for k in ("cpi", "ppi", "jobs", "claims", "fomc", "cpi_last", "ppi_last", "jobs_last", "claims_last", "unemployment_rate_last", "fed_funds_upper", "fed_funds_lower")})
-    return jsonify(_fed_cache["data"])
+    payload = dict(_fed_cache["data"])
+    payload["fetched_at"] = _fed_cache["ts"]
+    return jsonify(payload)
 
 
 @app.route("/api/debug/fed-calendar")

@@ -1015,7 +1015,17 @@ async function refreshFedCalendar(){
       let nextText = '';
       if(hasNext){
         const d = new Date(nextDateVal + 'T00:00:00');
-        nextText = `Next ${d.toLocaleDateString(undefined,{month:'short',day:'numeric'})} \u00b7 ${daysAwayLabel(d, today)}`;
+        const todayIso = today.toISOString().slice(0,10);
+        const fetchedTodayIso = data.fetched_at ? new Date(data.fetched_at * 1000).toISOString().slice(0,10) : null;
+        if(nextDateVal === todayIso && fetchedTodayIso === todayIso){
+          // The scheduled release date is today AND we've actually
+          // fetched since then — "Next ... today" reads oddly once the
+          // data has already come in, so show when it was polled instead.
+          const timeStr = new Date(data.fetched_at * 1000).toLocaleTimeString(undefined, {hour:'numeric', minute:'2-digit'});
+          nextText = `Polled today at ${timeStr}`;
+        }else{
+          nextText = `Next ${d.toLocaleDateString(undefined,{month:'short',day:'numeric'})} \u00b7 ${daysAwayLabel(d, today)}`;
+        }
       }
 
       let chip = '';
