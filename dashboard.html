@@ -1050,7 +1050,11 @@ async function refreshFedCalendar(){
           const chg = lastInfo.change;
           cls = (chg != null && chg < 0) ? 'up' : (chg != null && chg > 0) ? 'down' : '';
         }
-        chip = `<span class="stat ${cls}">${formatLastValue(lastInfo)} (${dateStr} data)</span>`;
+        chip = `<span class="stat ${cls}">${formatLastValue(lastInfo)} MoM (${dateStr} data)</span>`;
+        if(colorMode === 'sign-inverted' && lastInfo.yoy_value != null){
+          const yoySign = lastInfo.yoy_value >= 0 ? '+' : '';
+          chip += `<span class="stat">${yoySign}${lastInfo.yoy_value.toFixed(1)}% YoY</span>`;
+        }
       }
 
       return `<div class="earn-row">

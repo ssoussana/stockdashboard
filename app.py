@@ -1033,10 +1033,12 @@ MACRO_LABELS = {"crude_oil": "Crude Oil, WTI $/barrel (FRED)", "treasury_10y": "
 
 
 def fetch_fred_series(series_id):
-    """Latest two valid observations for a FRED series, used to compute the
-    latest value plus day-over-day change. FRED sometimes reports the most
-    recent date(s) as "." (not yet published) — pulling a handful of recent
-    observations and skipping missing ones handles that."""
+    """Latest observations for a FRED series — enough history (15 months)
+    to compute the latest value, month-over-month change, AND a proper
+    year-over-year change (vs. the same month a year ago), not just the
+    single prior month. FRED sometimes reports the most recent date(s) as
+    "." (not yet published) — pulling a handful extra and skipping
+    missing ones handles that."""
     r = _http.get(
         "https://api.stlouisfed.org/fred/series/observations",
         params={
@@ -1044,7 +1046,7 @@ def fetch_fred_series(series_id):
             "api_key": FRED_API_KEY,
             "file_type": "json",
             "sort_order": "desc",
-            "limit": 10,
+            "limit": 15,
         },
         timeout=(5, 15),
     )
@@ -1058,7 +1060,7 @@ def fetch_fred_series(series_id):
         raise ValueError("no published observations")
 
     latest = float(valid[0]["value"])
-    result = {"value": latest, "date": valid[0]["date"], "change": None, "percent_change": None, "prior_percent_change": None}
+    result = {"value": latest, "date": valid[0]["date"], "change": None, "percent_change": None, "prior_percent_change": None, "yoy_percent_change": None}
     if len(valid) > 1:
         prev = float(valid[1]["value"])
         result["change"] = latest - prev
@@ -1069,6 +1071,12 @@ def fetch_fred_series(series_id):
         # to see if a trend is accelerating or decelerating.
         prior = float(valid[2]["value"])
         result["prior_percent_change"] = (prev - prior) / prior * 100 if prior else None
+    if len(valid) > 12:
+        # Same month one year ago — assumes no gaps in a monthly series
+        # between now and 12 observations back, a safe assumption for
+        # CPI/PPI specifically, which publish reliably every month.
+        year_ago = float(valid[12]["value"])
+        result["yoy_percent_change"] = (latest - year_ago) / year_ago * 100 if year_ago else None
     return result
 
 
@@ -1769,8 +1777,9 @@ def fetch_fed_calendar():
                 else:
                     value = round(r["percent_change"], 2) if r["percent_change"] is not None else None
                     prior = round(r["prior_percent_change"], 2) if r["prior_percent_change"] is not None else None
+                    yoy = round(r["yoy_percent_change"], 2) if r["yoy_percent_change"] is not None else None
                     unit = "%"
-                    out[key] = {"ok": True, "value": value, "unit": unit, "date": r["date"], "prior_value": prior}
+                    out[key] = {"ok": True, "value": value, "unit": unit, "date": r["date"], "prior_value": prior, "yoy_value": yoy}
             except Exception as e:
                 print(f"[fed] {key} ({series_id}) failed: {e!r}", flush=True)
                 out[key] = {"ok": False, "error": str(e)}
