@@ -1655,7 +1655,21 @@ threading.Thread(target=_fear_greed_background_loop, daemon=True).start()
 
 
 # ---------- Fed calendar: next CPI, next PPI, next FOMC meeting ----------
-FED_CACHE_SECONDS = 24 * 60 * 60  # these schedules don't change intraday
+FED_CHECK_HOUR_ET = 8   # CPI/PPI/Jobs/Claims all release ~8:30am ET
+FED_CHECK_MINUTE_ET = 35  # 5-minute buffer for FRED to ingest the data before we check
+
+
+def next_fed_check_time_et(now_et):
+    """Next 8:35am ET — regardless of what time of day the previous check
+    happened to run (e.g. after a redeploy at 2pm), this always lines up
+    the NEXT check with shortly after the actual release window, well
+    before the 9:30am ET market open. Same principle as the near-open
+    tight-polling already used for stock indices, just once a day here
+    since these are daily/weekly releases, not continuously updating prices."""
+    target = now_et.replace(hour=FED_CHECK_HOUR_ET, minute=FED_CHECK_MINUTE_ET, second=0, microsecond=0)
+    if now_et >= target:
+        target += timedelta(days=1)
+    return target
 _fed_cache = load_json_cache("fed_cache.json")
 
 # FRED release IDs (fixed, don't change): CPI = 10, PPI = 46.
@@ -1844,7 +1858,12 @@ def _fed_background_loop():
                 print(f"[fed] fetch_fed_calendar raised: {e!r}", flush=True)
         else:
             print("[fed] FRED_API_KEY not set, skipping", flush=True)
-        time.sleep(FED_CACHE_SECONDS)
+
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        next_check = next_fed_check_time_et(now_et)
+        sleep_s = (next_check - now_et).total_seconds()
+        print(f"[fed] next check at {next_check.isoformat()} (sleeping {sleep_s/3600:.1f}h)", flush=True)
+        time.sleep(sleep_s)
 
 
 threading.Thread(target=_fed_background_loop, daemon=True).start()
