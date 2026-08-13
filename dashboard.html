@@ -1247,7 +1247,13 @@ async function refreshEarnings(){
       }
 
       const daysAway = Math.round((date - today) / 86400000);
-      const when = daysAway === 0 ? 'today' : daysAway === 1 ? 'tomorrow' : `in ${daysAway}d`;
+      // A negative daysAway here means the scheduled date has passed but
+      // this is still classified "upcoming" — i.e. the report actually
+      // happened, but Finnhub's calendar hasn't been updated with the
+      // actual results yet (a real, observed lag on their end, not a bug
+      // in our own classification). "in -1d" would be a confusing thing
+      // to show for that, so say plainly what's actually going on instead.
+      const when = daysAway < 0 ? 'Awaiting results' : daysAway === 0 ? 'today' : daysAway === 1 ? 'tomorrow' : `in ${daysAway}d`;
       return `<div class="movers-row">
         <span><span class="sym">${symLink(sym)}${tradeLink(sym)}</span><span class="name">${dateStr}${info.hour && hourLabel[info.hour] ? ' · '+hourLabel[info.hour] : ''}</span></span>
         <span class="pct">${when}</span>
