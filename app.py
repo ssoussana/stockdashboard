@@ -35,7 +35,9 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timedelta, time as dt_time
 from zoneinfo import ZoneInfo
 import requests
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, redirect
+
+from callvisor_license import callvisor_bp, CALLVISOR_HOSTS
 
 try:
     from pywebpush import webpush, WebPushException
@@ -308,10 +310,19 @@ def active_known_symbols():
         )
 
 app = Flask(__name__, static_folder=".")
+app.register_blueprint(callvisor_bp)
 
 
 @app.route("/")
 def index():
+    # CallVisor's licensing site shares this Render service with Market
+    # Pulse to avoid a second $7/month service. Requests arriving on the
+    # CallVisor domain get the CallVisor landing page instead of the
+    # stock dashboard; everything else (the onrender.com address) is
+    # unaffected.
+    host = request.host.split(":")[0].lower()
+    if host in CALLVISOR_HOSTS:
+        return redirect("/callvisor/")
     return send_from_directory(".", "dashboard.html")
 
 
