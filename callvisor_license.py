@@ -321,6 +321,11 @@ def stripe_webhook():
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
+        # Newer stripe-python returns a typed object here, not a plain
+        # dict — .get() isn't supported on it directly, so convert once
+        # up front and work with a real dict for the rest of this block.
+        if hasattr(session, "to_dict"):
+            session = session.to_dict()
         session_id = session["id"]
         email = (session.get("customer_details") or {}).get("email") or session.get("customer_email")
 
