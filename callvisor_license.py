@@ -21,6 +21,9 @@ Environment variables required:
                                 generate_signing_key.py — generate this ONCE,
                                 never regenerate after real keys have been
                                 issued, or every existing key stops validating)
+    CALLVISOR_ADMIN_TOKEN       a long random string only Steve knows — guards
+                                the POST /callvisor/admin/generate-beta-key
+                                endpoint used to mint beta-tester keys by hand
 
 The public half of that signing key is NOT a secret and will eventually be
 baked into the PC app for fully offline license validation. It is printed
@@ -34,7 +37,7 @@ import secrets
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 import stripe
@@ -51,6 +54,12 @@ STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID")
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY")
 CALLVISOR_FROM_EMAIL = os.environ.get("CALLVISOR_FROM_EMAIL", "CallVisor <license@call-visor.com>")
 CALLVISOR_SIGNING_PRIVATE_KEY = os.environ.get("CALLVISOR_SIGNING_PRIVATE_KEY")
+
+# Shared secret for the admin-only beta-key-generation endpoint. Not
+# exposed anywhere on the public site — only known to Steve, passed as
+# an X-Admin-Token header. Generate a long random value and set it in
+# Render; this is NOT the same as any Stripe or signing key.
+CALLVISOR_ADMIN_TOKEN = os.environ.get("CALLVISOR_ADMIN_TOKEN")
 
 # Hosts that should be treated as "this is the CallVisor site" for the
 # host-based routing added in app.py.
@@ -92,9 +101,23 @@ def init_db():
                 stripe_session_id TEXT UNIQUE NOT NULL,
                 issued_at TEXT NOT NULL,
                 max_activations INTEGER NOT NULL DEFAULT 2,
-                revoked INTEGER NOT NULL DEFAULT 0
+                revoked INTEGER NOT NULL DEFAULT 0,
+                key_type TEXT NOT NULL DEFAULT 'paid',
+                expires_at TEXT
             )
         """)
+        # Migration for a DB file created before key_type/expires_at
+        # existed (e.g. from earlier test purchases) — SQLite has no
+        # "ADD COLUMN IF NOT EXISTS", so just swallow the error if the
+        # column's already there.
+        for stmt in (
+            "ALTER TABLE licenses ADD COLUMN key_type TEXT NOT NULL DEFAULT 'paid'",
+            "ALTER TABLE licenses ADD COLUMN expires_at TEXT",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS activations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,20 +154,41 @@ def _b64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + padding)
 
 
-def generate_license_key(email: str, stripe_session_id: str, max_activations: int = MAX_ACTIVATIONS_DEFAULT) -> str:
+def generate_license_key(
+    email: str,
+    stripe_session_id: str,
+    max_activations: int = MAX_ACTIVATIONS_DEFAULT,
+    key_type: str = "paid",
+    exp_days: int | None = None,
+) -> tuple[str, str | None]:
+    """Returns (license_key, expires_at_iso_or_None).
+
+    exp_days=None means the key never expires (the normal paid-purchase
+    case). Beta keys pass exp_days=30 (or whatever was requested) — the
+    resulting "exp" field is signed as part of the key itself, so the PC
+    app can check it's expired purely offline, without ever calling
+    this server again after the initial activation.
+    """
     if _signing_key is None:
         raise RuntimeError("CALLVISOR_SIGNING_PRIVATE_KEY is not configured")
+
+    issued_at = datetime.now(timezone.utc)
+    expires_at = None
+    if exp_days is not None:
+        expires_at = (issued_at + timedelta(days=exp_days)).isoformat()
 
     payload = {
         "email": email,
         "sid": stripe_session_id,
-        "iat": datetime.now(timezone.utc).isoformat(),
+        "iat": issued_at.isoformat(),
+        "exp": expires_at,
         "max": max_activations,
+        "type": key_type,
     }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     signature = _signing_key.sign(payload_bytes, ec.ECDSA(hashes.SHA256()))
 
-    return f"CV1.{_b64url_encode(payload_bytes)}.{_b64url_encode(signature)}"
+    return f"CV1.{_b64url_encode(payload_bytes)}.{_b64url_encode(signature)}", expires_at
 
 
 def verify_license_key(license_key: str):
@@ -207,6 +251,41 @@ def send_license_email(to_email: str, license_key: str):
         return True
     except Exception as e:
         print(f"[callvisor] Resend send raised: {e!r}", flush=True)
+        return False
+
+
+def send_beta_key_email(to_email: str, license_key: str, expires_at: str):
+    if not RESEND_API_KEY:
+        print("[callvisor] RESEND_API_KEY not set, skipping beta email send", flush=True)
+        return False
+    try:
+        expires_display = datetime.fromisoformat(expires_at).strftime("%B %-d, %Y") if expires_at else "N/A"
+        r = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json={
+                "from": CALLVISOR_FROM_EMAIL,
+                "to": [to_email],
+                "subject": "Your CallVisor beta license key",
+                "html": f"""
+                    <p>Thanks for helping test CallVisor!</p>
+                    <p>Your beta license key (valid through <b>{expires_display}</b>):</p>
+                    <p style="font-family: monospace; font-size: 14px; background: #f4f4f4;
+                       padding: 12px; border-radius: 6px; word-break: break-all;">{license_key}</p>
+                    <p>Paste this into CallVisor's Settings &rarr; License tab to activate.
+                    This key can be used on up to 2 devices. It'll stop working after the date
+                    above — reach out if you'd like it extended.</p>
+                    <p>Found a bug or have feedback? Just reply to this email.</p>
+                """,
+            },
+            timeout=15,
+        )
+        if r.status_code >= 300:
+            print(f"[callvisor] Resend beta send failed: {r.status_code} {r.text}", flush=True)
+            return False
+        return True
+    except Exception as e:
+        print(f"[callvisor] Resend beta send raised: {e!r}", flush=True)
         return False
 
 
@@ -344,11 +423,14 @@ def stripe_webhook():
                 print(f"[callvisor] duplicate webhook for session={session_id}, skipping", flush=True)
                 return jsonify({"ok": True})
 
-            license_key = generate_license_key(email, session_id)
+            license_key, expires_at = generate_license_key(
+                email, session_id, key_type="paid", exp_days=None
+            )
             conn.execute(
-                "INSERT INTO licenses (license_key, email, stripe_session_id, issued_at, max_activations) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (license_key, email, session_id, datetime.now(timezone.utc).isoformat(), MAX_ACTIVATIONS_DEFAULT),
+                "INSERT INTO licenses (license_key, email, stripe_session_id, issued_at, max_activations, key_type, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (license_key, email, session_id, datetime.now(timezone.utc).isoformat(),
+                 MAX_ACTIVATIONS_DEFAULT, "paid", expires_at),
             )
 
         sent = send_license_email(email, license_key)
@@ -373,6 +455,14 @@ def activate():
     if not valid:
         return jsonify({"valid": False, "reason": reason}), 200
 
+    # Server-side expiration check too (belt-and-suspenders — the PC app
+    # is expected to check this offline on every launch using the same
+    # signed "exp" field, but don't let an already-expired beta key
+    # activate a brand new device either).
+    exp = payload.get("exp")
+    if exp and datetime.fromisoformat(exp) < datetime.now(timezone.utc):
+        return jsonify({"valid": False, "reason": "license key has expired"}), 200
+
     with _db_lock, _get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM licenses WHERE license_key = ?", (license_key,)
@@ -392,7 +482,7 @@ def activate():
         if already_activated:
             # Same device re-activating (reinstall/upgrade) — always allowed,
             # doesn't consume a new slot.
-            return jsonify({"valid": True, "reason": "already activated on this device"})
+            return jsonify({"valid": True, "reason": "already activated on this device", "expires_at": exp})
 
         activation_count = conn.execute(
             "SELECT COUNT(*) as c FROM activations WHERE license_key = ?", (license_key,)
@@ -406,4 +496,55 @@ def activate():
             (license_key, fingerprint, datetime.now(timezone.utc).isoformat()),
         )
 
-    return jsonify({"valid": True})
+    return jsonify({"valid": True, "expires_at": exp})
+
+
+@callvisor_bp.route("/admin/generate-beta-key", methods=["POST"])
+def admin_generate_beta_key():
+    """Steve-only endpoint for minting beta-test license keys with an
+    expiration, without needing a Stripe purchase at all.
+
+    Body: {"email": "tester@example.com", "days": 30, "send_email": true}
+    Header: X-Admin-Token: <CALLVISOR_ADMIN_TOKEN>
+    """
+    if not CALLVISOR_ADMIN_TOKEN:
+        return jsonify({"error": "admin endpoint not configured"}), 500
+    if request.headers.get("X-Admin-Token") != CALLVISOR_ADMIN_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip()
+    days = data.get("days", 30)
+    send_email = data.get("send_email", True)
+
+    if not email:
+        return jsonify({"error": "email is required"}), 400
+    try:
+        days = int(days)
+        if not (1 <= days <= 90):
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "days must be an integer between 1 and 90"}), 400
+
+    # No real Stripe session for a beta key — use a synthetic, still-unique
+    # identifier so it fits the same UNIQUE stripe_session_id column
+    # (also makes it obvious at a glance in the DB which rows are beta).
+    synthetic_session_id = f"beta-{secrets.token_hex(8)}"
+
+    license_key, expires_at = generate_license_key(
+        email, synthetic_session_id, key_type="beta", exp_days=days
+    )
+
+    with _db_lock, _get_conn() as conn:
+        conn.execute(
+            "INSERT INTO licenses (license_key, email, stripe_session_id, issued_at, max_activations, key_type, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (license_key, email, synthetic_session_id, datetime.now(timezone.utc).isoformat(),
+             MAX_ACTIVATIONS_DEFAULT, "beta", expires_at),
+        )
+
+    sent = False
+    if send_email:
+        sent = send_beta_key_email(email, license_key, expires_at)
+
+    return jsonify({"license_key": license_key, "expires_at": expires_at, "email_sent": sent})
