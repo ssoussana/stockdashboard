@@ -96,7 +96,7 @@ def init_db():
     with _db_lock, _get_conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS licenses (
-                license_key TEXT PRIMARY KEY,
+                activation_code TEXT PRIMARY KEY,
                 email TEXT NOT NULL,
                 stripe_session_id TEXT UNIQUE NOT NULL,
                 issued_at TEXT NOT NULL,
@@ -106,43 +106,81 @@ def init_db():
                 expires_at TEXT
             )
         """)
-        # Migration for a DB file created before key_type/expires_at
-        # existed (e.g. from earlier test purchases) — SQLite has no
-        # "ADD COLUMN IF NOT EXISTS", so just swallow the error if the
-        # column's already there.
+        # Migrations, each independently best-effort since SQLite has no
+        # "IF NOT EXISTS" for ALTER — safe to run on every startup.
         for stmt in (
             "ALTER TABLE licenses ADD COLUMN key_type TEXT NOT NULL DEFAULT 'paid'",
             "ALTER TABLE licenses ADD COLUMN expires_at TEXT",
+            # Short opaque activation codes replaced the old self-contained
+            # signed keys as the primary key column (see the block comment
+            # below) — renames any pre-existing DB from the old name.
+            "ALTER TABLE licenses RENAME COLUMN license_key TO activation_code",
         ):
             try:
                 conn.execute(stmt)
             except sqlite3.OperationalError:
-                pass  # column already exists
+                pass  # column already exists / already renamed
         conn.execute("""
             CREATE TABLE IF NOT EXISTS activations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                license_key TEXT NOT NULL,
+                activation_code TEXT NOT NULL,
                 fingerprint TEXT NOT NULL,
                 activated_at TEXT NOT NULL,
-                UNIQUE(license_key, fingerprint)
+                UNIQUE(activation_code, fingerprint)
             )
         """)
+        try:
+            conn.execute("ALTER TABLE activations RENAME COLUMN license_key TO activation_code")
+        except sqlite3.OperationalError:
+            pass
 
 
 init_db()
 
-# ---------- License key format ----------
+# ---------- Activation codes and device tokens ----------
 #
-# A key is:  CV1.<payload_b64url>.<signature_b64url>
-# payload is compact JSON: {"email": "...", "sid": "<stripe session id>",
-#                            "iat": "<issued_at iso>", "max": 2}
-# signed with ECDSA P-256 over SHA-256 of the payload bytes.
+# Two different things, deliberately kept separate:
 #
-# Validation only needs the PUBLIC key, so it can eventually be done
-# entirely offline by the PC app — this server-side /activate endpoint
-# additionally tracks activation counts, which is inherently a shared,
-# server-side concept (a single device can't know how many *other*
-# devices have already used the same key).
+# 1. ACTIVATION CODE — a short, opaque, random string like
+#    "K7QM-3XNP-B9WT-R2FH-5CDJ". This is what the customer sees in their
+#    email and types into CallVisor. It carries no information of its
+#    own — it's purely a lookup key into the `licenses` table (email,
+#    expiration, activation limit all live in the DB row).
+#
+# 2. DEVICE TOKEN — the long "CV1.<payload>.<signature>" signed token
+#    from before. No longer shown to anyone — it's minted by /activate
+#    the moment an activation code is redeemed, and the PC app caches it
+#    silently. This is what Test-CallVisorLicenseKey verifies offline on
+#    every launch, exactly as before; nothing about that offline-check
+#    logic changed, only when/how the token gets created.
+#
+# Net effect: short, professional-looking keys for customers, with zero
+# loss of offline verification once a device has activated — the only
+# new requirement is that a brand-new device needs one internet
+# connection at activation time to redeem its code, which was already
+# true (that's the same call that enforces the per-key device limit).
+
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature
+
+_P256_COORD_BYTES = 32
+
+# Crockford's Base32 alphabet — excludes I, L, O, U specifically to avoid
+# visual confusion (0/O, 1/I/L) when a customer is reading a code off an
+# email and typing it by hand.
+_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def _der_sig_to_raw(der_sig: bytes) -> bytes:
+    r, s = decode_dss_signature(der_sig)
+    return r.to_bytes(_P256_COORD_BYTES, "big") + s.to_bytes(_P256_COORD_BYTES, "big")
+
+
+def _raw_sig_to_der(raw_sig: bytes) -> bytes:
+    if len(raw_sig) != _P256_COORD_BYTES * 2:
+        raise ValueError("raw signature is the wrong length for P-256")
+    r = int.from_bytes(raw_sig[:_P256_COORD_BYTES], "big")
+    s = int.from_bytes(raw_sig[_P256_COORD_BYTES:], "big")
+    return encode_dss_signature(r, s)
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -154,45 +192,49 @@ def _b64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + padding)
 
 
-def generate_license_key(
-    email: str,
-    stripe_session_id: str,
-    max_activations: int = MAX_ACTIVATIONS_DEFAULT,
-    key_type: str = "paid",
-    exp_days: int | None = None,
-) -> tuple[str, str | None]:
-    """Returns (license_key, expires_at_iso_or_None).
+def generate_activation_code(group_count: int = 5, group_size: int = 4) -> str:
+    """E.g. "K7QM-3XNP-B9WT-R2FH-5CDJ" — 20 random characters (100 bits
+    of entropy) formatted as 5 groups of 4, 24 characters including
+    dashes. Collisions are astronomically unlikely, but the DB's
+    PRIMARY KEY constraint on this column is the actual backstop."""
+    groups = ["".join(secrets.choice(_CODE_ALPHABET) for _ in range(group_size)) for _ in range(group_count)]
+    return "-".join(groups)
 
-    exp_days=None means the key never expires (the normal paid-purchase
-    case). Beta keys pass exp_days=30 (or whatever was requested) — the
-    resulting "exp" field is signed as part of the key itself, so the PC
-    app can check it's expired purely offline, without ever calling
-    this server again after the initial activation.
-    """
+
+def sign_device_token(
+    email: str,
+    ref_id: str,
+    expires_at: str | None,
+    max_activations: int,
+    key_type: str,
+) -> str:
+    """Mints a device token for an ALREADY-DETERMINED expiration (pass
+    through the licenses row's expires_at as-is — this does not compute
+    a new expiration relative to "now", since a beta code issued with a
+    30-day window should still expire 30 days from ISSUANCE, not 30
+    days from whenever the customer happens to activate it)."""
     if _signing_key is None:
         raise RuntimeError("CALLVISOR_SIGNING_PRIVATE_KEY is not configured")
 
-    issued_at = datetime.now(timezone.utc)
-    expires_at = None
-    if exp_days is not None:
-        expires_at = (issued_at + timedelta(days=exp_days)).isoformat()
-
     payload = {
         "email": email,
-        "sid": stripe_session_id,
-        "iat": issued_at.isoformat(),
+        "sid": ref_id,
+        "iat": datetime.now(timezone.utc).isoformat(),
         "exp": expires_at,
         "max": max_activations,
         "type": key_type,
     }
     payload_bytes = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
-    signature = _signing_key.sign(payload_bytes, ec.ECDSA(hashes.SHA256()))
+    der_signature = _signing_key.sign(payload_bytes, ec.ECDSA(hashes.SHA256()))
+    raw_signature = _der_sig_to_raw(der_signature)
 
-    return f"CV1.{_b64url_encode(payload_bytes)}.{_b64url_encode(signature)}", expires_at
+    return f"CV1.{_b64url_encode(payload_bytes)}.{_b64url_encode(raw_signature)}"
 
 
 def verify_license_key(license_key: str):
-    """Returns (valid: bool, payload: dict|None, reason: str|None)."""
+    """Returns (valid: bool, payload: dict|None, reason: str|None).
+    Verifies a DEVICE TOKEN (the long CV1... string), not an activation
+    code — offline, using only the public key."""
     if _signing_key is None:
         return False, None, "server signing key not configured"
 
@@ -201,13 +243,14 @@ def verify_license_key(license_key: str):
         if prefix != "CV1":
             return False, None, "unrecognized key format"
         payload_bytes = _b64url_decode(payload_b64)
-        signature = _b64url_decode(sig_b64)
+        raw_signature = _b64url_decode(sig_b64)
+        der_signature = _raw_sig_to_der(raw_signature)
     except Exception:
         return False, None, "malformed key"
 
     public_key = _signing_key.public_key()
     try:
-        public_key.verify(signature, payload_bytes, ec.ECDSA(hashes.SHA256()))
+        public_key.verify(der_signature, payload_bytes, ec.ECDSA(hashes.SHA256()))
     except InvalidSignature:
         return False, None, "signature invalid"
 
@@ -221,7 +264,7 @@ def verify_license_key(license_key: str):
 
 # ---------- Email (Resend) ----------
 
-def send_license_email(to_email: str, license_key: str):
+def send_license_email(to_email: str, activation_code: str):
     if not RESEND_API_KEY:
         print("[callvisor] RESEND_API_KEY not set, skipping email send", flush=True)
         return False
@@ -236,9 +279,9 @@ def send_license_email(to_email: str, license_key: str):
                 "html": f"""
                     <p>Thanks for purchasing CallVisor!</p>
                     <p>Your license key:</p>
-                    <p style="font-family: monospace; font-size: 14px; background: #f4f4f4;
-                       padding: 12px; border-radius: 6px; word-break: break-all;">{license_key}</p>
-                    <p>Paste this into CallVisor's Settings &rarr; License tab to activate.
+                    <p style="font-family: monospace; font-size: 20px; letter-spacing: 1px; background: #f4f4f4;
+                       padding: 12px; border-radius: 6px; text-align: center;">{activation_code}</p>
+                    <p>Enter this into CallVisor's About tab to activate.
                     This key can be used on up to 2 devices.</p>
                     <p>Questions? Just reply to this email.</p>
                 """,
@@ -254,7 +297,7 @@ def send_license_email(to_email: str, license_key: str):
         return False
 
 
-def send_beta_key_email(to_email: str, license_key: str, expires_at: str):
+def send_beta_key_email(to_email: str, activation_code: str, expires_at: str):
     if not RESEND_API_KEY:
         print("[callvisor] RESEND_API_KEY not set, skipping beta email send", flush=True)
         return False
@@ -270,9 +313,9 @@ def send_beta_key_email(to_email: str, license_key: str, expires_at: str):
                 "html": f"""
                     <p>Thanks for helping test CallVisor!</p>
                     <p>Your beta license key (valid through <b>{expires_display}</b>):</p>
-                    <p style="font-family: monospace; font-size: 14px; background: #f4f4f4;
-                       padding: 12px; border-radius: 6px; word-break: break-all;">{license_key}</p>
-                    <p>Paste this into CallVisor's Settings &rarr; License tab to activate.
+                    <p style="font-family: monospace; font-size: 20px; letter-spacing: 1px; background: #f4f4f4;
+                       padding: 12px; border-radius: 6px; text-align: center;">{activation_code}</p>
+                    <p>Enter this into CallVisor's About tab to activate.
                     This key can be used on up to 2 devices. It'll stop working after the date
                     above — reach out if you'd like it extended.</p>
                     <p>Found a bug or have feedback? Just reply to this email.</p>
@@ -414,94 +457,94 @@ def stripe_webhook():
 
         with _db_lock, _get_conn() as conn:
             # Idempotency: Stripe can and does retry webhook delivery. If
-            # we've already issued a key for this exact session, don't
+            # we've already issued a code for this exact session, don't
             # issue (or email) a second one.
             existing = conn.execute(
-                "SELECT license_key FROM licenses WHERE stripe_session_id = ?", (session_id,)
+                "SELECT activation_code FROM licenses WHERE stripe_session_id = ?", (session_id,)
             ).fetchone()
             if existing:
                 print(f"[callvisor] duplicate webhook for session={session_id}, skipping", flush=True)
                 return jsonify({"ok": True})
 
-            license_key, expires_at = generate_license_key(
-                email, session_id, key_type="paid", exp_days=None
-            )
+            activation_code = generate_activation_code()
             conn.execute(
-                "INSERT INTO licenses (license_key, email, stripe_session_id, issued_at, max_activations, key_type, expires_at) "
+                "INSERT INTO licenses (activation_code, email, stripe_session_id, issued_at, max_activations, key_type, expires_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (license_key, email, session_id, datetime.now(timezone.utc).isoformat(),
-                 MAX_ACTIVATIONS_DEFAULT, "paid", expires_at),
+                (activation_code, email, session_id, datetime.now(timezone.utc).isoformat(),
+                 MAX_ACTIVATIONS_DEFAULT, "paid", None),
             )
 
-        sent = send_license_email(email, license_key)
-        print(f"[callvisor] issued license for {email} (session={session_id}), email_sent={sent}", flush=True)
+        sent = send_license_email(email, activation_code)
+        print(f"[callvisor] issued activation code for {email} (session={session_id}), email_sent={sent}", flush=True)
 
     return jsonify({"ok": True})
 
 
 @callvisor_bp.route("/activate", methods=["POST"])
 def activate():
-    """Called once by the CallVisor PC app the first time a key is entered.
-    Body: {"license_key": "...", "fingerprint": "..."}
+    """Called once by the CallVisor PC app the first time an activation
+    code is entered. Looks the code up directly (it's an opaque DB key,
+    not a signed token, so no signature check happens here) and, if
+    valid, mints and returns a signed device token for the PC app to
+    cache and verify offline from then on.
+
+    Body: {"activation_code": "...", "fingerprint": "..."}
     """
     data = request.get_json(silent=True) or {}
-    license_key = data.get("license_key", "")
+    activation_code = (data.get("activation_code", "") or "").strip().upper()
     fingerprint = data.get("fingerprint", "")
 
-    if not license_key or not fingerprint:
-        return jsonify({"valid": False, "reason": "missing license_key or fingerprint"}), 400
-
-    valid, payload, reason = verify_license_key(license_key)
-    if not valid:
-        return jsonify({"valid": False, "reason": reason}), 200
-
-    # Server-side expiration check too (belt-and-suspenders — the PC app
-    # is expected to check this offline on every launch using the same
-    # signed "exp" field, but don't let an already-expired beta key
-    # activate a brand new device either).
-    exp = payload.get("exp")
-    if exp and datetime.fromisoformat(exp) < datetime.now(timezone.utc):
-        return jsonify({"valid": False, "reason": "license key has expired"}), 200
+    if not activation_code or not fingerprint:
+        return jsonify({"valid": False, "reason": "missing activation_code or fingerprint"}), 400
 
     with _db_lock, _get_conn() as conn:
         row = conn.execute(
-            "SELECT * FROM licenses WHERE license_key = ?", (license_key,)
+            "SELECT * FROM licenses WHERE activation_code = ?", (activation_code,)
         ).fetchone()
         if row is None:
-            # Signature is valid but we have no record of it — shouldn't
-            # happen under normal operation, but treat as invalid rather
-            # than trusting the token alone.
-            return jsonify({"valid": False, "reason": "unknown license key"}), 200
+            return jsonify({"valid": False, "reason": "unrecognized activation code"}), 200
         if row["revoked"]:
-            return jsonify({"valid": False, "reason": "license revoked"}), 200
+            return jsonify({"valid": False, "reason": "this code has been revoked"}), 200
+
+        exp = row["expires_at"]
+        if exp and datetime.fromisoformat(exp) < datetime.now(timezone.utc):
+            return jsonify({"valid": False, "reason": "this code has expired"}), 200
 
         already_activated = conn.execute(
-            "SELECT 1 FROM activations WHERE license_key = ? AND fingerprint = ?",
-            (license_key, fingerprint),
+            "SELECT 1 FROM activations WHERE activation_code = ? AND fingerprint = ?",
+            (activation_code, fingerprint),
         ).fetchone()
-        if already_activated:
-            # Same device re-activating (reinstall/upgrade) — always allowed,
-            # doesn't consume a new slot.
-            return jsonify({"valid": True, "reason": "already activated on this device", "expires_at": exp})
 
-        activation_count = conn.execute(
-            "SELECT COUNT(*) as c FROM activations WHERE license_key = ?", (license_key,)
-        ).fetchone()["c"]
+        if not already_activated:
+            activation_count = conn.execute(
+                "SELECT COUNT(*) as c FROM activations WHERE activation_code = ?", (activation_code,)
+            ).fetchone()["c"]
+            if activation_count >= row["max_activations"]:
+                return jsonify({"valid": False, "reason": "activation limit reached for this code"}), 200
 
-        if activation_count >= row["max_activations"]:
-            return jsonify({"valid": False, "reason": "activation limit reached for this key"}), 200
+            conn.execute(
+                "INSERT INTO activations (activation_code, fingerprint, activated_at) VALUES (?, ?, ?)",
+                (activation_code, fingerprint, datetime.now(timezone.utc).isoformat()),
+            )
 
-        conn.execute(
-            "INSERT INTO activations (license_key, fingerprint, activated_at) VALUES (?, ?, ?)",
-            (license_key, fingerprint, datetime.now(timezone.utc).isoformat()),
+        # Always mint a fresh device token on success, whether this is a
+        # brand-new activation or a repeat one (reinstall/upgrade) — a
+        # repeat call means the PC app's local cache was wiped and needs
+        # a new token handed back either way.
+        device_token = sign_device_token(
+            email=row["email"],
+            ref_id=activation_code,
+            expires_at=exp,
+            max_activations=row["max_activations"],
+            key_type=row["key_type"],
         )
 
-    return jsonify({"valid": True, "expires_at": exp})
+    return jsonify({"valid": True, "device_token": device_token, "expires_at": exp})
 
 
 @callvisor_bp.route("/admin/generate-beta-key", methods=["POST"])
 def admin_generate_beta_key():
-    """Steve-only endpoint for minting beta-test license keys with an
+    """Steve-only endpoint for minting beta-test activation codes with an
     expiration, without needing a Stripe purchase at all.
 
     Body: {"email": "tester@example.com", "days": 30, "send_email": true}
@@ -526,25 +569,23 @@ def admin_generate_beta_key():
     except (TypeError, ValueError):
         return jsonify({"error": "days must be an integer between 1 and 90"}), 400
 
-    # No real Stripe session for a beta key — use a synthetic, still-unique
+    # No real Stripe session for a beta code — use a synthetic, still-unique
     # identifier so it fits the same UNIQUE stripe_session_id column
     # (also makes it obvious at a glance in the DB which rows are beta).
     synthetic_session_id = f"beta-{secrets.token_hex(8)}"
-
-    license_key, expires_at = generate_license_key(
-        email, synthetic_session_id, key_type="beta", exp_days=days
-    )
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    activation_code = generate_activation_code()
 
     with _db_lock, _get_conn() as conn:
         conn.execute(
-            "INSERT INTO licenses (license_key, email, stripe_session_id, issued_at, max_activations, key_type, expires_at) "
+            "INSERT INTO licenses (activation_code, email, stripe_session_id, issued_at, max_activations, key_type, expires_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (license_key, email, synthetic_session_id, datetime.now(timezone.utc).isoformat(),
+            (activation_code, email, synthetic_session_id, datetime.now(timezone.utc).isoformat(),
              MAX_ACTIVATIONS_DEFAULT, "beta", expires_at),
         )
 
     sent = False
     if send_email:
-        sent = send_beta_key_email(email, license_key, expires_at)
+        sent = send_beta_key_email(email, activation_code, expires_at)
 
-    return jsonify({"license_key": license_key, "expires_at": expires_at, "email_sent": sent})
+    return jsonify({"activation_code": activation_code, "expires_at": expires_at, "email_sent": sent})
