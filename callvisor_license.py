@@ -589,3 +589,58 @@ def admin_generate_beta_key():
         sent = send_beta_key_email(email, activation_code, expires_at)
 
     return jsonify({"activation_code": activation_code, "expires_at": expires_at, "email_sent": sent})
+
+
+@callvisor_bp.route("/admin/convert-to-permanent", methods=["POST"])
+def admin_convert_to_permanent():
+    """Steve-only endpoint for upgrading a beta tester to a permanent
+    (never-expiring) license — a database update only. The device
+    token already cached on the tester's PC still carries the OLD
+    expiration baked into its signature, so this alone doesn't change
+    what their app currently sees; they need to re-activate the same
+    code once (Settings > About > Activate) to receive a fresh token
+    reflecting the change. See Get-CallVisorLicenseStatus's expiring-
+    soon balloon in BTAutoToggle.ps1, which exists specifically to
+    prompt that re-activation before their old token's date arrives.
+
+    Body: EITHER {"activation_code": "..."} for one specific code,
+          OR {"email": "..."} to convert every non-revoked BETA code
+          on file for that email (paid codes are left untouched --
+          they're already permanent).
+    Header: X-Admin-Token: <CALLVISOR_ADMIN_TOKEN>
+    """
+    if not CALLVISOR_ADMIN_TOKEN:
+        return jsonify({"error": "admin endpoint not configured"}), 500
+    if request.headers.get("X-Admin-Token") != CALLVISOR_ADMIN_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    activation_code = (data.get("activation_code") or "").strip().upper()
+    email = (data.get("email") or "").strip()
+
+    if not activation_code and not email:
+        return jsonify({"error": "provide either activation_code or email"}), 400
+
+    with _db_lock, _get_conn() as conn:
+        if activation_code:
+            rows = conn.execute(
+                "SELECT activation_code FROM licenses WHERE activation_code = ? AND revoked = 0",
+                (activation_code,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT activation_code FROM licenses WHERE email = ? AND key_type = 'beta' AND revoked = 0",
+                (email,),
+            ).fetchall()
+
+        if not rows:
+            return jsonify({"error": "no matching, non-revoked license found"}), 404
+
+        codes = [row["activation_code"] for row in rows]
+        conn.executemany(
+            "UPDATE licenses SET key_type = 'paid', expires_at = NULL WHERE activation_code = ?",
+            [(c,) for c in codes],
+        )
+
+    print(f"[callvisor] converted to permanent: {codes}", flush=True)
+    return jsonify({"updated_count": len(codes), "activation_codes": codes})
